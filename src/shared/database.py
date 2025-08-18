@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager, asynccontextmanager
 from typing import Generator, AsyncGenerator, Optional, Union
 from uuid import UUID
-from src.config import Settings
+from src.config import settings
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -52,7 +52,7 @@ def get_engine(db_url: str, echo: bool = False, pool_size: int = 5) -> Engine:
 
     return _engine
 
-engine = create_async_engine(Settings.DATABASE_URL, echo=Settings.DB_ECHO, pool_pre_ping=True, future=True)
+engine = create_async_engine(settings.DATABASE_URL, echo=settings.DB_ECHO, pool_pre_ping=True, future=True)
 AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

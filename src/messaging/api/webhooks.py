@@ -11,6 +11,7 @@ from src.platform.infrastructure.cache import get_cached
 import hmac, hashlib
 
 router = APIRouter(prefix="/api/v1/wa", tags=["whatsapp-webhook"])
+legacy = APIRouter(prefix="/webhooks/whatsapp", tags=["whatsapp-webhook"])
 
 def _constant_time_eq(a: str, b: str) -> bool:
     try:
@@ -112,7 +113,15 @@ async def verify(phone_number_id: str, hub_mode: str, hub_challenge: str, hub_ve
     if hub_mode == "subscribe" and hub_verify_token == expected:
         return int(hub_challenge)
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="verify failed")
+# Legacy paths for tests/back-compat
 
+@legacy.get("/{phone_number_id}")
+async def legacy_verify(phone_number_id: str, hub_mode: str, hub_challenge: str, hub_verify_token: str):
+    return await verify(phone_number_id, hub_mode, hub_challenge, hub_verify_token)
+
+@legacy.post("/{phone_number_id}")
+async def legacy_receive(phone_number_id: str, request: Request):
+    return await receive(phone_number_id, request)
 
 
 

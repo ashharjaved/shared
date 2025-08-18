@@ -4,12 +4,15 @@ import time
 from typing import List, Optional
 from fastapi import Depends, HTTPException, status, Header
 from pydantic import BaseModel
-from src.config import Settings
+from src.config import settings
 from uuid import UUID
 from src.identity.domain.entities import Principal
 import hmac, hashlib
 from jose import jwt
 from typing import TypedDict, Optional
+from src.dependencies import get_session
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 class TokenData(BaseModel):
     sub: str
@@ -26,14 +29,14 @@ class TokenData(BaseModel):
 
 def create_access_token(sub: str, roles: list[str], tenant_id: UUID, expires_delta: timedelta | None = None):
     to_encode = {"sub": sub, "roles": roles, "tenant_id": tenant_id, "iat": int(time.time())}
-    ttl = int(expires_delta.total_seconds()) if expires_delta else (Settings.JWT_EXPIRE_MIN * 60)
+    ttl = int(expires_delta.total_seconds()) if expires_delta else (settings.JWT_EXPIRE_MIN * 60)
     to_encode["exp"] = int(time.time() + ttl)
-    return jwt.encode(to_encode, Settings.JWT_SECRET, algorithm=Settings.JWT_ALG)
+    return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALG)
 
-def decode_token(token: str) -> TokenData:
+def decode_token(token: str) -> dict:
     try:
-        data = jwt.decode(token, Settings.JWT_SECRET, algorithms=[Settings.JWT_ALG])
-        return TokenData(**data)
+        data = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALG])
+        return data
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
     except jwt.InvalidTokenError:
@@ -73,10 +76,26 @@ class Principal(TypedDict):
     tenant_id: UUID
     roles: list[str]
 
-async def get_principal(auth_header: str) -> Optional[Principal]:
+async def get_principal(
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    session: AsyncSession = Depends(get_session),
+) -> Optional[Principal]:
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization.split(" ", 1)[1]
+    payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALG])
+    await session.execute(text("set local app.jwt_tenant = :tenant"), {"tenant": str(payload["tenant_id"])})
+    return {"sub": payload["sub"], "tenant_id": payload["tenant_id"], "roles": payload.get("roles", [])}
+
+
+async def get_principal_old(auth_header: str) -> Optional[Principal]:
     if not auth_header or not auth_header.startswith("Bearer "):
         return None
     token = auth_header.split(" ", 1)[1]
-    payload = jwt.decode(token, Settings.JWT_SECRET, algorithms=[Settings.JWT_ALG])
+    payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALG])
     await session.execute(text("SET app.jwt_tenant = :tenant"), {"tenant": str(payload["tenant_id"])})
     return {"sub": payload["sub"], "tenant_id": payload["tenant_id"], "roles": payload.get("roles", [])}
+
+# tests expect this alias
+def issue_token(sub: str, tenant_id: UUID, roles: list[str]) -> str:
+    return create_access_token(sub=sub, roles=roles, tenant_id=tenant_id)

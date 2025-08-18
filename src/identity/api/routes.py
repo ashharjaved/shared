@@ -1,7 +1,10 @@
 from __future__ import annotations
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Header, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
+
+from src.config import settings
 
 from .schemas import (
     TenantCreate, TenantRead, TenantUpdate, TenantStatusUpdate,
@@ -105,8 +108,10 @@ async def issue_token(
     user = await user_repo.by_email(tenant_hint, payload.email)
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    token = create_access_token(user_id=user.id, tenant_id=user.tenant_id, roles=user.roles, email=user.email)
-    return TokenResponse(access_token=token, expires_in=60 * 60)
+    # token = create_access_token(user_id=user.id, tenant_id=user.tenant_id, roles=user.roles, email=user.email)
+    token = create_access_token(sub=str(user.id), tenant_id=UUID(user.tenant_id), roles=user.roles)
+    return TokenResponse(access_token=token, expires_in=settings.JWT_EXPIRE_MIN * 60)
+    
 
 # ---- Users (tenant scoped; admin only) ----
 @router.post("/users", response_model=UserRead, status_code=status.HTTP_201_CREATED)

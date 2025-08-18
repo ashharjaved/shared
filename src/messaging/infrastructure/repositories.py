@@ -14,7 +14,7 @@ from src.messaging.infrastructure.models import WhatsappChannel, Message
 class ChannelRepository:
     session: AsyncSession
 
-    async def get_by_tenant(self, tenant_id: str) -> Optional[WhatsappChannel]:
+    async def get_by_tenant(self, tenant_id: UUID) -> Optional[WhatsappChannel]:
         res = await self.session.execute(
             select(WhatsappChannel).where(WhatsappChannel.tenant_id == tenant_id)
         )
@@ -26,7 +26,7 @@ class ChannelRepository:
         )
         return res.scalars().first()
 
-    async def set_or_update(self, tenant_id: str, data: Dict[str, Any]) -> WhatsappChannel:
+    async def set_or_update(self, tenant_id: UUID, data: Dict[str, Any]) -> WhatsappChannel:
         existing = await self.get_by_tenant(tenant_id)
         if existing:
             for k, v in data.items():

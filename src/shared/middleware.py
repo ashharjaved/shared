@@ -5,7 +5,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 import uuid
-from src.shared.security import get_principal
+from jose import jwt
+from src.config import settings
 logger = logging.getLogger(__name__)
 
 class LoggingMiddleware(BaseHTTPMiddleware):
@@ -59,8 +60,16 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 class RequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         request.state.request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-        principal = get_principal(request.headers.get("Authorization", "")) or {}
-        request.state.tenant_id = principal.__getattribute__("tenant_id")
+        # principal = get_principal(request.headers.get("Authorization", "")) or {}
+        #request.state.tenant_id = principal.__getattribute__("tenant_id")
+        auth = request.headers.get("Authorization")
+        try:
+            if auth and auth.startswith("Bearer "):
+                payload = jwt.decode(auth.split(" ",1)[1], settings.JWT_SECRET, algorithms=[settings.JWT_ALG])
+                request.state.tenant_id = payload.get("tenant_id")
+        except Exception:
+            request.state.tenant_id = None
+
         resp: Response = await call_next(request)
         resp.headers["X-Request-ID"] = request.state.request_id
         return resp

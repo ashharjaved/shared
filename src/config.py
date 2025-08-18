@@ -6,11 +6,11 @@ from pydantic import Field
 
 
 class Settings(BaseSettings):
-    # Database
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL",
         "postgresql+asyncpg://postgresql:postgres@localhost:5432/centralize_api",
     )
+    DB_ECHO: bool = Field(default=False, description="Enable SQLAlchemy engine echo (debug only)")
 
     # JWT
     JWT_SECRET: str = os.getenv("JWT_SECRET", "your-super-secret-jwt-key-change-in-production")
