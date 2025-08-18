@@ -2,7 +2,7 @@
 -- WhatsApp Chatbot Platform — Production SQL Pack (PostgreSQL 14+)
 -- ====================================================================================
 -- Re-run helpers (commented; use with care)
--- DROP SCHEMA public CASCADE; CREATE SCHEMA public;
+-- -- DROP SCHEMA public CASCADE; CREATE SCHEMA public;
 -- ====================================================================================
 
 -- 0) SETUP ---------------------------------------------------------------------------
@@ -34,7 +34,14 @@ BEGIN;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'message_status_enum') THEN
-    CREATE TYPE message_status_enum AS ENUM ('QUEUED','SENT','DELIVERED','FAILED');
+    CREATE TYPE message_status_enum AS ENUM ('QUEUED','SENT','DELIVERED','FAILED','READ');
+  END IF;
+
+  -- Backfill READ if enum already existed
+  IF EXISTS (SELECT 1 FROM pg_type WHERE typname = 'message_status_enum')
+     AND NOT EXISTS (SELECT 1 FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
+                     WHERE t.typname = 'message_status_enum' AND e.enumlabel = 'READ') THEN
+    ALTER TYPE message_status_enum ADD VALUE IF NOT EXISTS 'READ';
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'session_status_enum') THEN
@@ -150,6 +157,13 @@ CREATE TABLE IF NOT EXISTS users (
   CONSTRAINT uq_users__tenant_email UNIQUE(tenant_id, email),
   CONSTRAINT chk_users__roles_nonempty CHECK (array_length(roles,1) > 0)
 );
+-- expose composite uniqueness for tenant-safe references
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_users__id_tenant') THEN
+    ALTER TABLE users ADD CONSTRAINT uq_users__id_tenant UNIQUE (id, tenant_id);
+  END IF;
+END$$;
 
 COMMENT ON TABLE users IS 'Tenant users and admins.';
 COMMENT ON COLUMN users.password_hash IS 'Argon2/BCrypt hash.';
@@ -177,6 +191,12 @@ CREATE TABLE IF NOT EXISTS whatsapp_channels (
   CONSTRAINT uq_channels__tenant_business UNIQUE(tenant_id, business_phone),
   CONSTRAINT chk_channels__phone_e164 CHECK (business_phone ~ '^\+[1-9]\d{1,14}$')
 );
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_whatsapp_channels__id_tenant') THEN
+    ALTER TABLE whatsapp_channels ADD CONSTRAINT uq_whatsapp_channels__id_tenant UNIQUE (id, tenant_id);
+  END IF;
+END$$;
 
 COMMENT ON TABLE whatsapp_channels IS
 'WhatsApp Business configuration per tenant. Sensitive fields are ciphertext; actual encryption managed by KMS/app layer.';
@@ -187,10 +207,17 @@ CREATE INDEX IF NOT EXISTS ix_channels__tenant_active ON whatsapp_channels(tenan
 CREATE INDEX IF NOT EXISTS ix_channels__tenant_created ON whatsapp_channels(tenant_id, created_at DESC);
 
 -- 2.4 Messages (tenant-scoped; partitioned monthly by created_at)
-CREATE TABLE IF NOT EXISTS messages (
-  id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id            uuid NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-  channel_id           uuid NOT NULL REFERENCES whatsapp_channels(id) ON DELETE RESTRICT,
+-- Re-create cleanly to fix earlier invalid constraint syntax and support partitioned uniqueness.
+DROP TABLE IF EXISTS messages CASCADE;
+BEGIN;
+
+-- Recreate messages with composite PK that includes the partition key (created_at)
+DROP TABLE IF EXISTS messages CASCADE;
+
+CREATE TABLE messages (
+  id                   uuid NOT NULL DEFAULT gen_random_uuid(),
+  tenant_id            uuid NOT NULL,
+  channel_id           uuid NOT NULL,
   whatsapp_message_id  text NULL,
   direction            message_direction_enum NOT NULL,
   from_phone           varchar(20) NOT NULL,
@@ -205,33 +232,34 @@ CREATE TABLE IF NOT EXISTS messages (
   delivered_at         timestamptz NULL,
   status_updated_at    timestamptz NOT NULL DEFAULT now(),
   deleted_at           timestamptz NULL,
-  CONSTRAINT uq_messages__whatsapp_id UNIQUE(whatsapp_message_id),
+
+  -- PK must include partition key
+  CONSTRAINT pk_messages PRIMARY KEY (id, created_at),
+
+  -- Uniqueness on WA message id must also include the partition key
+  CONSTRAINT uq_messages__whatsapp_id UNIQUE (whatsapp_message_id, created_at),
+
   CONSTRAINT chk_messages__from_e164 CHECK (from_phone ~ '^\+[1-9]\d{1,14}$'),
   CONSTRAINT chk_messages__to_e164   CHECK (to_phone   ~ '^\+[1-9]\d{1,14}$'),
-  CONSTRAINT fk_messages__tenant_match
-    CHECK (tenant_id = (SELECT tenant_id FROM whatsapp_channels c WHERE c.id = channel_id))
+
+  -- Tenant-safe channel reference (composite FK)
+  CONSTRAINT fk_messages__channel_tenant
+    FOREIGN KEY (channel_id, tenant_id)
+    REFERENCES whatsapp_channels(id, tenant_id)
+    ON DELETE RESTRICT
 ) PARTITION BY RANGE (created_at);
 
 COMMENT ON TABLE messages IS
-'Operational transport for WhatsApp messages. No PHI should be stored here; use tokenized links/IDs only.';
+'Operational transport for WhatsApp messages. No PHI should be stored; use tokenized links/IDs only.';
 
--- Current month partition auto-create
-DO $$
-DECLARE
-  part_name text := format('messages_y%sm%s', to_char(now(),'YYYY'), to_char(now(),'MM'));
-  start_ts  timestamptz := date_trunc('month', now());
-  end_ts    timestamptz := (date_trunc('month', now()) + interval '1 month');
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = part_name) THEN
-    EXECUTE format($f$
-      CREATE TABLE IF NOT EXISTS %I PARTITION OF messages
-      FOR VALUES FROM (%L) TO (%L)$f$, part_name, start_ts, end_ts);
-  END IF;
-END$$;
+-- Helpful index so UPDATE/SELECT by id remain efficient
+CREATE INDEX IF NOT EXISTS ix_messages__id ON messages(id);
 
 -- Hot-path indexes
 CREATE INDEX IF NOT EXISTS ix_messages__tenant_channel_from_created
   ON messages (tenant_id, channel_id, from_phone, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_messages__tenant_channel_to_created
+  ON messages (tenant_id, channel_id, to_phone, created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_messages__tenant_created
   ON messages (tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_messages__content_gin
@@ -243,11 +271,37 @@ CREATE INDEX IF NOT EXISTS ix_messages__failed_retries
   ON messages(channel_id, status, retry_count)
   WHERE status = 'FAILED' AND retry_count < 3;
 
+-- Create current-month partition and enable RLS on it
+DO $$
+DECLARE
+  part_name text := format('messages_y%sm%s', to_char(now(),'YYYY'), to_char(now(),'MM'));
+  start_ts  timestamptz := date_trunc('month', now());
+  end_ts    timestamptz := (date_trunc('month', now()) + interval '1 month');
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = part_name) THEN
+    EXECUTE format($f$
+      CREATE TABLE IF NOT EXISTS %I PARTITION OF messages
+      FOR VALUES FROM (%L) TO (%L)$f$, part_name, start_ts, end_ts);
+    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', part_name);
+    -- EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', part_name); -- optional
+  END IF;
+END$$;
+
+COMMIT;
+
+
+
+
+
+
+
+
+
 -- 2.5 Conversation Sessions (tenant-scoped)
 CREATE TABLE IF NOT EXISTS conversation_sessions (
   id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id            uuid NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-  channel_id           uuid NOT NULL REFERENCES whatsapp_channels(id) ON DELETE RESTRICT,
+  tenant_id            uuid NOT NULL,
+  channel_id           uuid NOT NULL,
   phone_number         varchar(20) NOT NULL,
   current_menu_id      uuid NULL,
   context_jsonb        jsonb NOT NULL DEFAULT '{}',
@@ -261,34 +315,36 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
   CONSTRAINT uq_sessions__channel_phone UNIQUE(channel_id, phone_number),
   CONSTRAINT chk_sessions__ttl CHECK (expires_at > created_at),
   CONSTRAINT chk_sessions__phone_e164 CHECK (phone_number ~ '^\+[1-9]\d{1,14}$'),
-  CONSTRAINT fk_sessions__tenant_match
-    CHECK (tenant_id = (SELECT tenant_id FROM whatsapp_channels c WHERE c.id = channel_id))
+  CONSTRAINT fk_sessions__channel_tenant FOREIGN KEY (channel_id, tenant_id)
+    REFERENCES whatsapp_channels(id, tenant_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS ix_sessions__tenant_phone_created
   ON conversation_sessions(tenant_id, phone_number, created_at DESC);
 CREATE INDEX IF NOT EXISTS ix_sessions__expires_at
-  ON conversation_sessions(expires_at) WHERE expires_at < now();
+  ON conversation_sessions(tenant_id, expires_at);
 CREATE INDEX IF NOT EXISTS ix_sessions__stage_last_activity
   ON conversation_sessions(conversation_stage, last_activity);
 
 -- 2.6 Menu Flows (tenant-scoped)
 CREATE TABLE IF NOT EXISTS menu_flows (
   id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id            uuid NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+  tenant_id            uuid NOT NULL,
   industry_type        industry_type_enum NOT NULL,
   name                 varchar(255) NOT NULL,
   definition_jsonb     jsonb NOT NULL,
   version              int NOT NULL DEFAULT 1,
   is_active            boolean NOT NULL DEFAULT true,
   is_default           boolean NOT NULL DEFAULT false,
-  created_by           uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  created_by           uuid NOT NULL,
   created_at           timestamptz NOT NULL DEFAULT now(),
   updated_at           timestamptz NOT NULL DEFAULT now(),
   deleted_at           timestamptz NULL,
   CONSTRAINT uq_flows__tenant_name_version UNIQUE(tenant_id, name, version),
   CONSTRAINT uq_flows__tenant_industry_default UNIQUE(tenant_id, industry_type, is_default)
-    DEFERRABLE INITIALLY DEFERRED
+    DEFERRABLE INITIALLY DEFERRED,
+  CONSTRAINT fk_menu_flows__creator_tenant FOREIGN KEY (created_by, tenant_id)
+    REFERENCES users(id, tenant_id) ON DELETE RESTRICT
 );
 
 -- 2.7 Healthcare: Patients, Doctors, Appointments (tenant-scoped)
@@ -307,6 +363,12 @@ CREATE TABLE IF NOT EXISTS patients (
   CONSTRAINT uq_patients__tenant_phone UNIQUE(tenant_id, phone_number),
   CONSTRAINT chk_patients__phone_e164 CHECK (phone_number ~ '^\+[1-9]\d{1,14}$')
 );
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_patients__id_tenant') THEN
+    ALTER TABLE patients ADD CONSTRAINT uq_patients__id_tenant UNIQUE (id, tenant_id);
+  END IF;
+END$$;
 
 CREATE TABLE IF NOT EXISTS doctors (
   id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -322,12 +384,18 @@ CREATE TABLE IF NOT EXISTS doctors (
   deleted_at           timestamptz NULL,
   CONSTRAINT chk_doctors__duration_positive CHECK (consultation_duration > 0)
 );
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_doctors__id_tenant') THEN
+    ALTER TABLE doctors ADD CONSTRAINT uq_doctors__id_tenant UNIQUE (id, tenant_id);
+  END IF;
+END$$;
 
 CREATE TABLE IF NOT EXISTS appointments (
   id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id            uuid NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-  patient_id           uuid NOT NULL REFERENCES patients(id) ON DELETE RESTRICT,
-  doctor_id            uuid NOT NULL REFERENCES doctors(id) ON DELETE RESTRICT,
+  patient_id           uuid NOT NULL,
+  doctor_id            uuid NOT NULL,
   service_type         varchar(100) NOT NULL,
   scheduled_at         timestamptz NOT NULL,
   duration_minutes     int NOT NULL DEFAULT 30,
@@ -341,9 +409,10 @@ CREATE TABLE IF NOT EXISTS appointments (
   deleted_at           timestamptz NULL,
   CONSTRAINT chk_appointments__duration CHECK (duration_minutes > 0),
   CONSTRAINT chk_appointments__future CHECK (scheduled_at > now()),
-  CONSTRAINT fk_appointments__tenant_match
-    CHECK (tenant_id = (SELECT tenant_id FROM patients p WHERE p.id = patient_id)
-       AND tenant_id = (SELECT tenant_id FROM doctors  d WHERE d.id = doctor_id))
+  CONSTRAINT fk_appointments__patient_tenant FOREIGN KEY (patient_id, tenant_id)
+    REFERENCES patients(id, tenant_id) ON DELETE RESTRICT,
+  CONSTRAINT fk_appointments__doctor_tenant FOREIGN KEY (doctor_id, tenant_id)
+    REFERENCES doctors(id, tenant_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS ix_appt__patient_scheduled ON appointments(patient_id, scheduled_at DESC);
@@ -368,11 +437,17 @@ CREATE TABLE IF NOT EXISTS students (
   CONSTRAINT uq_students__tenant_phone UNIQUE(tenant_id, phone_number),
   CONSTRAINT uq_students__tenant_sid UNIQUE(tenant_id, student_id_number)
 );
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_students__id_tenant') THEN
+    ALTER TABLE students ADD CONSTRAINT uq_students__id_tenant UNIQUE (id, tenant_id);
+  END IF;
+END$$;
 
 CREATE TABLE IF NOT EXISTS fee_records (
   id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id            uuid NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-  student_id           uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+  student_id           uuid NOT NULL,
   academic_year        varchar(10) NOT NULL,
   fee_type             fee_type_enum NOT NULL,
   amount               numeric(10,2) NOT NULL,
@@ -386,8 +461,8 @@ CREATE TABLE IF NOT EXISTS fee_records (
   updated_at           timestamptz NOT NULL DEFAULT now(),
   deleted_at           timestamptz NULL,
   CONSTRAINT chk_fee__nonneg CHECK (amount >= 0 AND paid_amount >= 0 AND late_fee >= 0),
-  CONSTRAINT fk_fee__tenant_match
-    CHECK (tenant_id = (SELECT tenant_id FROM students s WHERE s.id = student_id))
+  CONSTRAINT fk_fee__student_tenant FOREIGN KEY (student_id, tenant_id)
+    REFERENCES students(id, tenant_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS ix_fee__student_year ON fee_records(student_id, academic_year DESC);
@@ -404,18 +479,26 @@ CREATE TABLE IF NOT EXISTS notification_templates (
   variables            jsonb NOT NULL DEFAULT '[]',
   delivery_channels    delivery_channel_enum[] NOT NULL,
   is_active            boolean NOT NULL DEFAULT true,
-  created_by           uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  created_by           uuid NOT NULL,
   created_at           timestamptz NOT NULL DEFAULT now(),
   updated_at           timestamptz NOT NULL DEFAULT now(),
   deleted_at           timestamptz NULL,
   CONSTRAINT uq_tpl__tenant_name UNIQUE(tenant_id, name),
-  CONSTRAINT chk_tpl__channels_nonempty CHECK (array_length(delivery_channels,1) > 0)
+  CONSTRAINT chk_tpl__channels_nonempty CHECK (array_length(delivery_channels,1) > 0),
+  CONSTRAINT fk_notification_templates__creator_tenant FOREIGN KEY (created_by, tenant_id)
+    REFERENCES users(id, tenant_id) ON DELETE RESTRICT
 );
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_notification_templates__id_tenant') THEN
+    ALTER TABLE notification_templates ADD CONSTRAINT uq_notification_templates__id_tenant UNIQUE (id, tenant_id);
+  END IF;
+END$$;
 
 CREATE TABLE IF NOT EXISTS notifications (
   id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id            uuid NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-  template_id          uuid NULL REFERENCES notification_templates(id) ON DELETE SET NULL,
+  template_id          uuid NULL,
   recipient_phone      varchar(20) NOT NULL,
   scheduled_at         timestamptz NOT NULL,
   priority             notification_priority_enum NOT NULL DEFAULT 'NORMAL',
@@ -428,7 +511,9 @@ CREATE TABLE IF NOT EXISTS notifications (
   delivered_at         timestamptz NULL,
   deleted_at           timestamptz NULL,
   CONSTRAINT chk_notifications__attempts CHECK (delivery_attempts >= 0 AND max_retry_attempts >= 0),
-  CONSTRAINT chk_notifications__phone_e164 CHECK (recipient_phone ~ '^\+[1-9]\d{1,14}$')
+  CONSTRAINT chk_notifications__phone_e164 CHECK (recipient_phone ~ '^\+[1-9]\d{1,14}$'),
+  CONSTRAINT fk_notifications__template_tenant FOREIGN KEY (template_id, tenant_id)
+    REFERENCES notification_templates(id, tenant_id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS ix_notifications__queue
@@ -523,15 +608,15 @@ LANGUAGE plpgsql AS $$
 DECLARE
   forbidden_keys text[] := ARRAY['patient_name','dob','medical_id','mrn','ssn','address'];
 BEGIN
-  -- If message content includes suspicious keys, block (app should tokenize/de-identify)
-  IF (SELECT bool_or(k = ANY(forbidden_keys))
+  IF jsonb_typeof(NEW.content_jsonb) = 'object' AND
+     (SELECT bool_or(k = ANY(forbidden_keys))
         FROM jsonb_object_keys(NEW.content_jsonb) AS k) THEN
     RAISE EXCEPTION 'PHI-like fields not allowed in messages.content_jsonb';
   END IF;
   RETURN NEW;
 END$$;
 
--- Write to outbox after aggregate mutations
+-- Write to outbox after aggregate mutations (fixed: use NEW.id/OLD.id directly)
 CREATE OR REPLACE FUNCTION write_outbox_event() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -544,20 +629,15 @@ BEGIN
   IF TG_OP IN ('INSERT','UPDATE') THEN
     payload := to_jsonb(NEW);
     ten_id  := NEW.tenant_id;
-    IF NEW ? 'id' THEN
-      agg_id := NEW.id;
-    ELSE
-      -- fallback: some tables might use different PK name; try channel/session/messages
-      agg_id := COALESCE(NEW.id, NULL);
-    END IF;
+    agg_id  := NEW.id;
   ELSE
     payload := to_jsonb(OLD);
     ten_id  := OLD.tenant_id;
-    agg_id  := COALESCE(OLD.id, NULL);
+    agg_id  := OLD.id;
   END IF;
 
   INSERT INTO outbox_events(tenant_id, aggregate_type, aggregate_id, event_type, payload_jsonb)
-  VALUES (ten_id, agg_type, COALESCE(agg_id, gen_random_uuid()), ev_type, payload);
+  VALUES (ten_id, agg_type, agg_id, ev_type, payload);
 
   RETURN COALESCE(NEW, OLD);
 END$$;
@@ -595,6 +675,7 @@ CREATE TRIGGER trg_fee_records__updated_at      BEFORE UPDATE ON fee_records    
 CREATE TRIGGER trg_menu_flows__updated_at       BEFORE UPDATE ON menu_flows          FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_notification_templates__updated_at BEFORE UPDATE ON notification_templates FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_notifications__updated_at    BEFORE UPDATE ON notifications       FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_tenant_configurations__updated_at BEFORE UPDATE ON tenant_configurations FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- tenant safety triggers
 CREATE TRIGGER trg_users__tenant_guard              BEFORE INSERT OR UPDATE ON users               FOR EACH ROW EXECUTE FUNCTION ensure_tenant_id();
@@ -611,6 +692,7 @@ CREATE TRIGGER trg_notification_templates__tenant_guard BEFORE INSERT OR UPDATE 
 CREATE TRIGGER trg_notifications__tenant_guard      BEFORE INSERT OR UPDATE ON notifications       FOR EACH ROW EXECUTE FUNCTION ensure_tenant_id();
 CREATE TRIGGER trg_outbox__tenant_guard             BEFORE INSERT OR UPDATE ON outbox_events       FOR EACH ROW EXECUTE FUNCTION ensure_tenant_id();
 CREATE TRIGGER trg_idem__tenant_guard               BEFORE INSERT OR UPDATE ON idempotency_keys    FOR EACH ROW EXECUTE FUNCTION ensure_tenant_id();
+CREATE TRIGGER trg_tenant_configurations__tenant_guard BEFORE INSERT OR UPDATE ON tenant_configurations FOR EACH ROW EXECUTE FUNCTION ensure_tenant_id();
 
 -- PHI enforcement on messages
 CREATE TRIGGER trg_messages__no_phi BEFORE INSERT OR UPDATE ON messages
@@ -674,7 +756,7 @@ COMMIT;
 -- 6) VIEWS & MATERIALIZED VIEWS ------------------------------------------------------
 BEGIN;
 
--- Recent messages per (tenant, channel) limited to last 50 by window function
+-- Recent messages per (tenant, channel) limited to last 50 by window function; tenant-scoped
 CREATE OR REPLACE VIEW vw_recent_messages AS
 SELECT *
 FROM (
@@ -683,11 +765,12 @@ FROM (
     row_number() OVER (PARTITION BY m.tenant_id, m.channel_id ORDER BY m.created_at DESC) AS rn
   FROM messages m
 ) t
-WHERE t.rn <= 50;
+WHERE t.rn <= 50
+  AND t.tenant_id = jwt_tenant();
 
-COMMENT ON VIEW vw_recent_messages IS 'Last 50 messages per (tenant, channel) for dashboards.';
+COMMENT ON VIEW vw_recent_messages IS 'Last 50 messages per (tenant, channel); explicitly tenant-scoped.';
 
--- Conversation windows: last 20 messages correlated to active session window
+-- Conversation windows: last 20 messages correlated to active session window; tenant-scoped
 CREATE OR REPLACE VIEW vw_conversation_windows AS
 SELECT *
 FROM (
@@ -702,9 +785,10 @@ FROM (
    AND (m.from_phone = s.phone_number OR m.to_phone = s.phone_number)
    AND m.created_at BETWEEN s.created_at AND s.expires_at
 ) z
-WHERE z.rn <= 20;
+WHERE z.rn <= 20
+  AND z.tenant_id = jwt_tenant();
 
-COMMENT ON VIEW vw_conversation_windows IS 'Window of recent messages inside each active session timebox.';
+COMMENT ON VIEW vw_conversation_windows IS 'Window of recent messages inside each active session; explicitly tenant-scoped.';
 
 -- Daily message stats (MATERIALIZED) per tenant/day & status
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_message_stats AS
@@ -717,6 +801,15 @@ FROM messages
 GROUP BY tenant_id, day, status;
 
 CREATE INDEX IF NOT EXISTS ix_mv_msgstats__tenant_day ON mv_daily_message_stats(tenant_id, day);
+-- Required for CONCURRENTLY
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mv_daily_message_stats
+  ON mv_daily_message_stats (tenant_id, day, status);
+
+-- RLS-safe reader over MV
+CREATE OR REPLACE VIEW vw_daily_message_stats AS
+SELECT *
+FROM mv_daily_message_stats
+WHERE tenant_id = jwt_tenant();
 
 -- Refresh helper
 CREATE OR REPLACE PROCEDURE sp_refresh_daily_stats() LANGUAGE sql AS $$
@@ -750,21 +843,21 @@ BEGIN
   RETURN false;
 END$$;
 
--- Validate legal status transitions for messages
+-- Validate legal status transitions for messages (includes READ)
 CREATE OR REPLACE FUNCTION legal_message_transition(old_status message_status_enum, new_status message_status_enum)
 RETURNS boolean
 LANGUAGE sql AS $$
   SELECT CASE
     WHEN old_status IS NULL AND new_status IN ('QUEUED') THEN true
-    WHEN old_status = 'QUEUED' AND new_status IN ('SENT','FAILED') THEN true
-    WHEN old_status = 'SENT'   AND new_status IN ('DELIVERED','FAILED') THEN true
-    WHEN old_status = 'DELIVERED' AND new_status IN ('FAILED') THEN true
+    WHEN old_status = 'QUEUED'    AND new_status IN ('SENT','FAILED') THEN true
+    WHEN old_status = 'SENT'      AND new_status IN ('DELIVERED','FAILED') THEN true
+    WHEN old_status = 'DELIVERED' AND new_status IN ('READ','FAILED') THEN true
     WHEN old_status = new_status THEN true
     ELSE false
   END
 $$;
 
--- Send message: inserts queued message, optional idempotency
+-- Send message: inserts queued message, optional idempotency (fixed hashing)
 CREATE OR REPLACE FUNCTION sp_send_message(
     p_channel_id uuid,
     p_to_phone   varchar,
@@ -779,7 +872,6 @@ DECLARE
 BEGIN
   -- Idempotency (optional)
   IF p_idempotency_key IS NOT NULL AND ensure_idempotency('send_message', p_idempotency_key) THEN
-    -- Return an existing message id if you store it; here we simply short-circuit
     RAISE NOTICE 'Idempotent call ignored (send_message/%).', p_idempotency_key;
     RETURN NULL;
   END IF;
@@ -796,7 +888,8 @@ BEGIN
   VALUES (
     v_tenant, p_channel_id, NULL, 'OUTBOUND',
     (SELECT business_phone FROM whatsapp_channels WHERE id = p_channel_id),
-    p_to_phone, p_content, encode(digest(coalesce(p_content::text,''), 'sha256'), 'hex'),
+    p_to_phone, p_content,
+    encode(digest(convert_to(coalesce(p_content::text,''), 'UTF8'), 'sha256'), 'hex'),
     p_message_type, 'QUEUED'
   )
   RETURNING id INTO v_msg_id;
@@ -915,7 +1008,7 @@ LANGUAGE sql AS $$
   DELETE FROM idempotency_keys WHERE expires_at <= expire_before;
 $$;
 
--- Partition helper: create next month partition for messages
+-- Partition helper: create next month partition for messages (+RLS)
 CREATE OR REPLACE PROCEDURE sp_create_next_month_partition()
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -927,6 +1020,8 @@ BEGIN
     EXECUTE format($f$
       CREATE TABLE IF NOT EXISTS %I PARTITION OF messages
       FOR VALUES FROM (%L) TO (%L)$f$, part_name, start_ts, end_ts);
+    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', part_name);
+    -- EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', part_name); -- optional
   END IF;
 END$$;
 
@@ -959,99 +1054,3 @@ COMMIT;
 -- ====================================================================================
 -- End of SQL Pack
 -- ====================================================================================
-
-
--- ============================================================================
--- #suggestion changes: Production-readiness patches merged on 2025-08-16 (IST)
--- Notes:
--- - All changes are idempotent (IF NOT EXISTS / guarded DO-blocks).
--- - Addresses: enum completeness, hot-path index, MV CONCURRENTLY requirement,
---   and explicit tenant scoping for views / MV reader.
--- ============================================================================
-
--- 1) Enums --------------------------------------------------------------------
--- #suggestion changes: Add 'READ' state to message_status_enum (if missing)
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_enum e
-    JOIN pg_type t ON t.oid = e.enumtypid
-    WHERE t.typname = 'message_status_enum' AND e.enumlabel = 'READ'
-  ) THEN
-    ALTER TYPE message_status_enum ADD VALUE IF NOT EXISTS 'READ';
-  END IF;
-END$$;
-
--- #suggestion changes: Update legal transition helper to allow DELIVERED -> READ
-CREATE OR REPLACE FUNCTION legal_message_transition(
-  old_status message_status_enum,
-  new_status message_status_enum
-) RETURNS boolean
-LANGUAGE sql AS $$
-  SELECT CASE
-    WHEN old_status IS NULL AND new_status IN ('QUEUED') THEN true
-    WHEN old_status = 'QUEUED'    AND new_status IN ('SENT','FAILED') THEN true
-    WHEN old_status = 'SENT'      AND new_status IN ('DELIVERED','FAILED') THEN true
-    WHEN old_status = 'DELIVERED' AND new_status IN ('READ','FAILED') THEN true
-    WHEN old_status = new_status THEN true
-    ELSE false
-  END
-$$;
-
--- 2) Indexes ------------------------------------------------------------------
--- #suggestion changes: Add recipient-side hot-path index
-CREATE INDEX IF NOT EXISTS ix_messages__tenant_channel_to_created
-  ON messages (tenant_id, channel_id, to_phone, created_at DESC);
-
--- 3) Views / Materialized Views ----------------------------------------------
--- #suggestion changes: Make vw_recent_messages explicitly tenant-scoped
-CREATE OR REPLACE VIEW vw_recent_messages AS
-SELECT *
-FROM (
-  SELECT
-    m.*,
-    row_number() OVER (PARTITION BY m.tenant_id, m.channel_id ORDER BY m.created_at DESC) AS rn
-  FROM messages m
-) t
-WHERE t.rn <= 50
-  AND t.tenant_id = jwt_tenant();
-
-COMMENT ON VIEW vw_recent_messages IS 'Last 50 messages per (tenant, channel); explicitly tenant-scoped.';
-
--- #suggestion changes: Make vw_conversation_windows explicitly tenant-scoped
-CREATE OR REPLACE VIEW vw_conversation_windows AS
-SELECT *
-FROM (
-  SELECT
-    s.id AS session_id,
-    m.*,
-    row_number() OVER (PARTITION BY s.id ORDER BY m.created_at DESC) AS rn
-  FROM conversation_sessions s
-  JOIN messages m
-    ON m.tenant_id = s.tenant_id
-   AND m.channel_id = s.channel_id
-   AND (m.from_phone = s.phone_number OR m.to_phone = s.phone_number)
-   AND m.created_at BETWEEN s.created_at AND s.expires_at
-) z
-WHERE z.rn <= 20
-  AND z.tenant_id = jwt_tenant();
-
-COMMENT ON VIEW vw_conversation_windows IS 'Window of recent messages inside each active session; explicitly tenant-scoped.';
-
--- #suggestion changes: MV unique index required for REFRESH CONCURRENTLY
-CREATE UNIQUE INDEX IF NOT EXISTS ux_mv_daily_message_stats
-  ON mv_daily_message_stats (tenant_id, day, status);
-
--- #suggestion changes: RLS-safe reader over MV; prefer granting SELECT on the view
-CREATE OR REPLACE VIEW vw_daily_message_stats AS
-SELECT *
-FROM mv_daily_message_stats
-WHERE tenant_id = jwt_tenant();
-
--- Optional privilege hardening (uncomment and tailor to your roles)
--- REVOKE ALL ON mv_daily_message_stats FROM PUBLIC;
--- GRANT SELECT ON vw_daily_message_stats TO PUBLIC; -- or a specific role
-
--- ============================================================================
--- End of #suggestion changes
--- ============================================================================
