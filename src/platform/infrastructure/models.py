@@ -13,11 +13,20 @@ from uuid import UUID
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import ForeignKey, text, String, CheckConstraint, UniqueConstraint, Index
+from sqlalchemy import ForeignKey, text, String, CheckConstraint, UniqueConstraint, Index, Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
 
 from shared.database import Base
+
+class Base(DeclarativeBase):
+    pass
+
+# Enum name must match the DB enum 'config_type_enum' (already created).
+CONFIG_TYPE_ENUM = SAEnum(
+    "GENERAL", "WHITELABEL", "INTEGRATION", "RISK",
+    name="config_type_enum", native_enum=True
+)
 
 class TenantConfiguration(Base):
     """Per-tenant configuration key/value pairs."""
@@ -27,7 +36,7 @@ class TenantConfiguration(Base):
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey('tenants.id'), nullable=False)
     config_key: Mapped[str] = mapped_column(String(100), nullable=False)
     config_value: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    config_type: Mapped[str] = mapped_column(String(20), nullable=False, server_default='GENERAL')  # config_type_enum
+    config_type: Mapped[str] = mapped_column(CONFIG_TYPE_ENUM, nullable=False, server_default=text("'GENERAL'"))
     is_encrypted: Mapped[bool] = mapped_column(nullable=False, server_default=text('false'))
     created_at: Mapped[datetime] = mapped_column(server_default=text('now()'))
     updated_at: Mapped[datetime] = mapped_column(server_default=text('now()'))

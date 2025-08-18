@@ -3,6 +3,7 @@ import logging, uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from .identity.api.routes import router as identity_router
+from src.platform.api.routes import router as platform_config_router
 
 app = FastAPI(title="WhatsApp Chatbot Platform - API", version="1.0")
 
@@ -29,6 +30,7 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(LoggingMiddleware)
     add_exception_handlers(app)
+    app.include_router(platform_config_router)
 
     app.include_router(auth_router)
     return app

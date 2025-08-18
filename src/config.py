@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os
-from pydantic import BaseSettings
+from pydantic import BaseSettings, Field
 
 class Settings(BaseSettings):
     # Database
@@ -21,6 +21,7 @@ class Settings(BaseSettings):
 
     # Security knobs
     BCRYPT_ROUNDS: int = int(os.getenv("BCRYPT_ROUNDS", "12"))
+    CONFIG_TTL_SECONDS: int = Field(default=30, description="In-process config cache TTL in seconds")
 
     class Config:
         env_file = ".env"
