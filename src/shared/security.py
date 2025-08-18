@@ -3,9 +3,10 @@ import time, jwt
 from typing import List, Optional
 from fastapi import Depends, HTTPException, status, Header
 from pydantic import BaseModel
-from ..config import settings
+from src.config import Settings
 from uuid import UUID
 from src.identity.domain.entities import Principal
+import hmac, hashlib
 
 class TokenData(BaseModel):
     sub: str
@@ -16,13 +17,13 @@ class TokenData(BaseModel):
 
 def create_access_token(*, user_id: str, tenant_id: str, roles: List[str]) -> str:
     now = int(time.time())
-    exp = now + settings.JWT_EXPIRE_MIN * 60
+    exp = now + Settings.JWT_EXPIRE_MIN * 60
     payload = {"sub": user_id, "tenant_id": tenant_id, "roles": roles, "iat": now, "exp": exp}
-    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALG)
+    return jwt.encode(payload, Settings.JWT_SECRET, algorithm=Settings.JWT_ALG)
 
 def decode_token(token: str) -> TokenData:
     try:
-        data = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALG])
+        data = jwt.decode(token, Settings.JWT_SECRET, algorithms=[Settings.JWT_ALG])
         return TokenData(**data)
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
@@ -55,3 +56,17 @@ async def get_tenant_from_header(x_tenant_id: Optional[str] = Header(None)) -> O
     if not x_tenant_id:
         return None
     return x_tenant_id
+
+def verify_hub_signature(raw_body: bytes, app_secret: str, signature_header: Optional[str]) -> bool:
+    """
+    Verify X-Hub-Signature-256 = 'sha256=<hex>'.
+    """
+    if not signature_header or not signature_header.startswith("sha256="):
+        return False
+    supplied = signature_header.split("=", 1)[1].strip()
+    mac = hmac.new(app_secret.encode("utf-8"), msg=raw_body, digestmod=hashlib.sha256)
+    expected = mac.hexdigest()
+    try:
+        return hmac.compare_digest(supplied, expected)
+    except Exception:
+        return False

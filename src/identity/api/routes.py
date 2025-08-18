@@ -16,10 +16,10 @@ from ..application.handlers import (
     handle_create_tenant, handle_get_tenant, handle_create_user, handle_get_user,
     handle_assign_role, verify_password, handle_update_tenant, handle_update_tenant_status
 )
-from ...shared.security import create_access_token, require_roles, get_principal, get_tenant_from_header
-from ...shared.database import get_session
-from ..infrastructure.repositories import TenantRepository, UserRepository
-from ...identity.domain.entities import Principal
+from src.shared.security import create_access_token, require_roles, get_principal, get_tenant_from_header
+from src.shared.database import get_session
+from src.identity.infrastructure.repositories import TenantRepository, UserRepository
+from src.identity.domain.entities import Principal
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Identity"])
 

@@ -73,7 +73,8 @@ class ConversationSession(Base):
             "tenant_id = (SELECT tenant_id FROM whatsapp_channels c WHERE c.id = channel_id)",
             name='fk_sessions__tenant_match'
         ),
-        Index('ix_sessions__tenant_phone_created', 'tenant_id', 'phone_number', 'created_at', postgresql_desc=True),
+        # Index('ix_sessions__tenant_phone_created', 'tenant_id', 'phone_number', 'created_at', postgresql_desc=True),
+        Index('ix_sessions__tenant_phone_created', 'tenant_id', 'phone_number', 'created_at'),
         Index('ix_sessions__expires_at', 'expires_at', postgresql_where=text('expires_at < now()')),
         Index('ix_sessions__stage_last_activity', 'conversation_stage', 'last_activity'),
     )

@@ -17,10 +17,8 @@ from sqlalchemy import ForeignKey, text, String, CheckConstraint, UniqueConstrai
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
 
-from shared.database import Base
+from src.shared.database import Base
 
-class Base(DeclarativeBase):
-    pass
 
 # Enum name must match the DB enum 'config_type_enum' (already created).
 CONFIG_TYPE_ENUM = SAEnum(

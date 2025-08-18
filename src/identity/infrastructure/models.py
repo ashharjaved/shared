@@ -16,7 +16,8 @@ from sqlalchemy import ForeignKey, text, String, CheckConstraint, UniqueConstrai
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import CITEXT, ARRAY
 
-from shared.database import Base
+from src.shared.database import Base
+from src.messaging.infrastructure.models import WhatsappChannel
 
 class Tenant(Base):
     """Platform organization with subscription plan."""

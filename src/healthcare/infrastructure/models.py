@@ -98,7 +98,8 @@ class Appointment(Base):
             "AND tenant_id = (SELECT tenant_id FROM doctors d WHERE d.id = doctor_id)",
             name='fk_appointments__tenant_match'
         ),
-        Index('ix_appt__patient_scheduled', 'patient_id', 'scheduled_at', postgresql_desc=True),
+        Index('ix_appt__patient_scheduled', 'patient_id', 'scheduled_at'),
+        # Index('ix_appt__patient_scheduled', 'patient_id', 'scheduled_at', postgresql_desc=True),
         Index('ix_appt__doctor_scheduled', 'doctor_id', 'scheduled_at'),
         Index('ix_appt__tenant_status_date', 'tenant_id', 'status', 'scheduled_at'),
     )

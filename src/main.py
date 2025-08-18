@@ -2,8 +2,9 @@ from __future__ import annotations
 import logging, uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from .identity.api.routes import router as identity_router
+from src.identity.api.routes import router as identity_router
 from src.platform.api.routes import router as platform_config_router
+from .identity.api.routes import router as auth_router
 
 app = FastAPI(title="WhatsApp Chatbot Platform - API", version="1.0")
 
@@ -11,8 +12,8 @@ logger = logging.getLogger("uvicorn.error")
 
 
 from fastapi.middleware.cors import CORSMiddleware
-from .shared.middleware import LoggingMiddleware
-from .shared.exceptions import add_exception_handlers
+from src.shared.middleware import LoggingMiddleware
+from src.shared.exceptions import add_exception_handlers
 
 def create_app() -> FastAPI:
     app = FastAPI(

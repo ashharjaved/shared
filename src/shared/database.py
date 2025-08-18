@@ -17,14 +17,13 @@ from uuid import UUID
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase
 from sqlalchemy.engine import Engine
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-
 class Base(DeclarativeBase):
     pass
 
 _engine: Optional[Engine] = None
 _session_factory = None
 _async_session_factory = None
+
 
 def get_engine(db_url: str, echo: bool = False, pool_size: int = 5) -> Engine:
     """Create and configure SQLAlchemy engine with connection pooling."""
@@ -60,16 +59,16 @@ def get_session_factory(engine: Engine):
         )
     return _session_factory
 
-def get_async_session_factory(async_engine):
-    """Create async session factory with tenant context management."""
-    global _async_session_factory
-    if _async_session_factory is None:
-        _async_session_factory = async_sessionmaker(
-            bind=async_engine,
-            expire_on_commit=False,
-            class_=AsyncSession,
-        )
-    return _async_session_factory
+# def get_async_session_factory(async_engine):
+    # """Create async session factory with tenant context management."""
+    # global _async_session_factory
+    # if _async_session_factory is None:
+    #     _async_session_factory = async_sessionmaker(
+    #         bind=async_engine,
+    #         expire_on_commit=False,
+    #         class_=AsyncSession,
+    #     )
+    # return _async_session_factory
 
 @contextmanager
 def session_scope(tenant_id: UUID):
@@ -113,6 +112,30 @@ def tenant_scope(session: Session, tenant_id: UUID | str) -> Generator[None, Non
             text("SELECT set_config('app.jwt_tenant', :val, true)"),
             {"val": prev_val if prev_val is not None else ""},
         )
+
+_async_engine = None
+_async_session_factory = None
+
+def _get_async_engine():
+    """
+    Lazy init async engine from settings.DATABASE_URL
+    """
+    from src.config import settings
+    global _async_engine
+    if _async_engine is None:
+        _async_engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
+    return _async_engine
+
+def async_session_factory():
+    """
+    Return an async session factory, compatible with src.dependencies.get_session().
+    Usage:
+        async with async_session_factory() as session: ...
+    """
+    global _async_session_factory
+    if _async_session_factory is None:
+        _async_session_factory = async_sessionmaker(bind=_get_async_engine(), expire_on_commit=False, class_=AsyncSession)
+    return _async_session_factory()
 
 __all__ = [
     'Base',

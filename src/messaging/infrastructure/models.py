@@ -10,13 +10,13 @@ Security notes:
 """
 from uuid import UUID
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 from sqlalchemy import ForeignKey, text, String, CheckConstraint, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import JSONB, ENUM
 
-from shared.database import Base
+from src.shared.database import Base
 
 class WhatsappChannel(Base):
     """WhatsApp Business API channel configuration."""
@@ -47,7 +47,8 @@ class WhatsappChannel(Base):
         UniqueConstraint('tenant_id', 'business_phone', name='uq_channels__tenant_business'),
         CheckConstraint("business_phone ~ '^\\+[1-9]\\d{1,14}$'", name='chk_channels__phone_e164'),
         Index('ix_channels__tenant_active', 'tenant_id', 'is_active'),
-        Index('ix_channels__tenant_created', 'tenant_id', 'created_at', postgresql_desc=True),
+        # Index('ix_channels__tenant_created', 'tenant_id', 'created_at', postgresql_desc=True),
+        Index('ix_channels__tenant_created', 'tenant_id', text('created_at DESC'))
     )
 
 class Message(Base):
@@ -83,8 +84,9 @@ class Message(Base):
             name='fk_messages__tenant_match'
         ),
         Index("ix_messages__tenant_channel_to_created","tenant_id", "channel_id", "to_phone", "created_at",postgresql_ops={"created_at": "DESC"}),
-        Index('ix_messages__tenant_channel_from_created', 'tenant_id', 'channel_id', 'from_phone', 'created_at', postgresql_desc=True),
-        Index('ix_messages__tenant_created', 'tenant_id', 'created_at', postgresql_desc=True),
+        # Index('ix_messages__tenant_channel_from_created', 'tenant_id', 'channel_id', 'from_phone', 'created_at', postgresql_desc=True),
+        Index('ix_messages__tenant_channel_from_created', 'tenant_id', 'channel_id', 'from_phone', 'created_at'),
+        Index('ix_messages__tenant_created', 'tenant_id', 'created_at'),
         Index('ix_messages__content_gin', 'content_jsonb', postgresql_using='gin'),
         Index('ix_messages__content_hash', 'content_hash'),
         Index('ix_messages__non_delivered', 'channel_id', 'status', postgresql_where=text("status <> 'DELIVERED'")),

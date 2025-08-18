@@ -69,7 +69,8 @@ class Notification(Base):
         CheckConstraint('delivery_attempts >= 0 AND max_retry_attempts >= 0', name='chk_notifications__attempts'),
         CheckConstraint("recipient_phone ~ '^\\+[1-9]\\d{1,14}$'", name='chk_notifications__phone_e164'),
         Index('ix_notifications__queue', 'scheduled_at', 'status', 'priority'),
-        Index('ix_notifications__tenant_status_created', 'tenant_id', 'status', 'created_at', postgresql_desc=True),
+        # Index('ix_notifications__tenant_status_created', 'tenant_id', 'status', 'created_at', postgresql_desc=True),
+        Index('ix_notifications__tenant_status_created', 'tenant_id', 'status', 'created_at'),
         Index('ix_notifications__recipient_recent', 'recipient_phone', 'created_at', postgresql_desc=True),
     )
 

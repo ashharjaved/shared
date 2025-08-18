@@ -73,7 +73,8 @@ class FeeRecord(Base):
             "tenant_id = (SELECT tenant_id FROM students s WHERE s.id = student_id)",
             name='fk_fee__tenant_match'
         ),
-        Index('ix_fee__student_year', 'student_id', 'academic_year', postgresql_desc=True),
+        # Index('ix_fee__student_year', 'student_id', 'academic_year', postgresql_desc=True),
+        Index('ix_fee__student_year', 'student_id', 'academic_year'),
         Index('ix_fee__due_status', 'due_date', 'status', postgresql_where=text("status IN ('PENDING','OVERDUE')")),
         Index('ix_fee__tenant_status_due', 'tenant_id', 'status', 'due_date'),
     )
