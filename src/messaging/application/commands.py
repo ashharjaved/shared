@@ -1,7 +1,28 @@
 from __future__ import annotations
 from typing import Any, Dict, Optional
-
+from dataclasses import dataclass
 from src.messaging.infrastructure.whatsapp_client import build_outbound_payload
+
+@dataclass
+class LinkChannel:
+    tenant_id: str
+    data: Dict[str, Any]  # as dict from OnboardingRequest
+
+@dataclass
+class PersistInboundEvent:
+    # raw normalized fields computed by webhook handler
+    tenant_id: str
+    channel_id: str
+    messages: list[dict]
+    statuses: list[dict]
+
+@dataclass
+class PrepareOutboundMessage:
+    tenant_id: str
+    to: str
+    text: Optional[str]
+    template: Optional[Dict[str, Any]]
+    media: Optional[Dict[str, Any]]
 
 class MessageDeliveryService:
     def prepare_payload(

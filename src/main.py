@@ -4,7 +4,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from src.identity.api.routes import router as identity_router
 from src.platform.api.routes import router as platform_config_router
-from .identity.api.routes import router as auth_router
+from src.identity.api.routes import router as auth_router
+from src.identity.api.routes import router as identity_router
+from src.platform.api.routes import router as platform_config_router
+from src.identity.api.routes import router as auth_router
+from src.messaging.api.routes import router as messaging_routes
+from src.messaging.api.webhooks import router as messaging_webhooks
 
 app = FastAPI(title="WhatsApp Chatbot Platform - API", version="1.0")
 
@@ -56,3 +61,5 @@ async def add_request_id_and_logging(request: Request, call_next):
 
 # Mount Identity routes
 app.include_router(identity_router)
+app.include_router(messaging_webhooks)  # public (signature verified)
+app.include_router(messaging_routes)    # protected (Bearer)

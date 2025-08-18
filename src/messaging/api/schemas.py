@@ -1,13 +1,15 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Literal
-from pydantic_settings import BaseModel, Field, constr, validator
+from typing import Any, Dict, List, Optional, Literal, Annotated
+from pydantic import BaseModel, Field, constr, field_validator, StringConstraints
 
+# E.164 constrained string (Pydantic v2)
+E164Str = Annotated[str, StringConstraints(pattern=r"^\+[1-9]\d{1,14}$")]
 class WhatsAppVerifyQuery(BaseModel):
-    hub_mode: constr(strip_whitespace=True) = Field(alias="hub.mode")
+    hub_mode: str = Field(alias="hub.mode")
     hub_verify_token: str = Field(alias="hub.verify_token")
     hub_challenge: str = Field(alias="hub.challenge")
 
-    @validator("hub_mode")
+    @field_validator("hub_mode")
     def ensure_subscribe(cls, v: str) -> str:
         if v.lower() != "subscribe":
             raise ValueError("hub.mode must be 'subscribe'")
@@ -15,7 +17,7 @@ class WhatsAppVerifyQuery(BaseModel):
 
 class OnboardingRequest(BaseModel):
     phone_number_id: str
-    business_phone: Optional[constr(regex=r"^\+[1-9]\d{1,14}$")] = None
+    business_phone: Optional[E164Str] = None
     access_token: Optional[str] = None
     verify_token: Optional[str] = None
     webhook_url: Optional[str] = None
@@ -94,12 +96,12 @@ class MediaSpec(BaseModel):
     url: str
 
 class OutboundRequest(BaseModel):
-    to: constr(regex=r"^\+[1-9]\d{1,14}$")
+    to: E164Str
     text: Optional[str] = None
     template: Optional[TemplateSpec] = None
     media: Optional[MediaSpec] = None
 
-    @validator("text", always=True)
+    @field_validator("text")
     def at_least_one_kind(cls, v, values):
         if not v and not values.get("template") and not values.get("media"):
             raise ValueError("Provide text or template or media")
