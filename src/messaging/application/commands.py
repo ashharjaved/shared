@@ -3,10 +3,16 @@ from typing import Any, Dict, Optional
 from dataclasses import dataclass
 from src.messaging.infrastructure.whatsapp_client import build_outbound_payload
 
-@dataclass
+@dataclass(slots=True)
 class LinkChannel:
     tenant_id: str
-    data: Dict[str, Any]  # as dict from OnboardingRequest
+    phone_number_id: str   # as returned from Meta WA
+    business_phone: str    # E.164; validated at API layer
+    access_token_ciphertext: str
+    webhook_verify_token_ciphertext: str
+    webhook_url: str
+    rate_limit_per_second: int = 10
+    monthly_message_limit: int = 10000
 
 @dataclass
 class PersistInboundEvent:
@@ -42,3 +48,5 @@ class MessageDeliveryService:
             template=template,
             media=media,
         )
+
+__all__ = ["LinkChannel", "PrepareOutboundMessage"]

@@ -1,9 +1,13 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Literal, Annotated
-from pydantic import BaseModel, Field, constr, field_validator, StringConstraints
+from pydantic import BaseModel, Field, field_validator
+from pydantic.types import StringConstraints
 
 # E.164 constrained string (Pydantic v2)
-E164Str = Annotated[str, StringConstraints(pattern=r"^\+[1-9]\d{1,14}$")]
+PhoneE164 = Optional[Annotated[str, StringConstraints(pattern=r'^\+[1-9]\d{1,14}$')]]
+
+from typing_extensions import Annotated
+
 class WhatsAppVerifyQuery(BaseModel):
     hub_mode: str = Field(alias="hub.mode")
     hub_verify_token: str = Field(alias="hub.verify_token")
@@ -17,7 +21,7 @@ class WhatsAppVerifyQuery(BaseModel):
 
 class OnboardingRequest(BaseModel):
     phone_number_id: str
-    business_phone: Optional[E164Str] = None
+    business_phone: PhoneE164 = Field(None, description="E.164 phone number like +14155550123")
     access_token: Optional[str] = None
     verify_token: Optional[str] = None
     webhook_url: Optional[str] = None
@@ -96,7 +100,7 @@ class MediaSpec(BaseModel):
     url: str
 
 class OutboundRequest(BaseModel):
-    to: E164Str
+    to: PhoneE164 = Field(None, description="E.164 phone number like +14155550123")
     text: Optional[str] = None
     template: Optional[TemplateSpec] = None
     media: Optional[MediaSpec] = None

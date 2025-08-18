@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager, asynccontextmanager
 from typing import Generator, AsyncGenerator, Optional, Union
 from uuid import UUID
-
+from src.config import Settings
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -52,6 +52,12 @@ def get_engine(db_url: str, echo: bool = False, pool_size: int = 5) -> Engine:
 
     return _engine
 
+engine = create_async_engine(Settings.DATABASE_URL, echo=Settings.DB_ECHO, pool_pre_ping=True, future=True)
+AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+     async with AsyncSessionLocal() as session:
+         yield session
 
 def get_session_factory(engine: Engine) -> sessionmaker:
     """Create (once) and return a sync sessionmaker bound to the given engine."""
@@ -123,7 +129,8 @@ def get_async_engine() -> AsyncEngine:
     from src.config import settings  # local import to avoid config import cycles
     global _async_engine
     if _async_engine is None:
-        _async_engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
+        _async_engine = create_async_engine(settings.DATABASE_URL, echo=settings.DB_ECHO, pool_pre_ping=True, future=True)
+
 
         @event.listens_for(_async_engine, "connect")
         def _set_default_tenant_async(dbapi_connection, connection_record):

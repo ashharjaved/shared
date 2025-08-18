@@ -1,9 +1,13 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+from uuid import UUID
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from sqlalchemy.exc import IntegrityError
+from src.messaging.infrastructure.models import Message
+from src.shared.database import async_session
+from sqlalchemy import insert
 from src.messaging.infrastructure.models import WhatsappChannel, Message
 
 @dataclass
@@ -75,10 +79,38 @@ class InboundRepository:
         await self.session.flush()
         return msg
 
-    async def apply_status_update(self, vendor_message_id: str, vendor_status: str) -> bool:
+    async def apply_status_update(self, vendor_message_id: str, vendor_status: str) -> bool:        
         status_map = {"sent": "SENT", "delivered": "DELIVERED", "read": "DELIVERED", "failed": "FAILED"}
         new_status = status_map.get(vendor_status, "DELIVERED")
         res = await self.session.execute(
             update(Message).where(Message.whatsapp_message_id == vendor_message_id).values(status=new_status)
         )
         return res.rowcount > 0
+    
+    @staticmethod
+    async def persist_inbound(phone_number_id: str, payload: dict) -> None:
+        """
+        Extract whatsapp_message_id and other fields; insert once.
+        """
+        wa_id = payload.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {}).get("messages", [{}])[0].get("id")
+        if not wa_id:
+            return  # no-op for non-message events
+        stmt = insert(Message).values(
+            tenant_id=None,           # set by trigger/DI
+            channel_id=None,          # resolved upstream by phone_number_id
+            whatsapp_message_id=wa_id,
+            direction="INBOUND",
+            from_phone=payload["entry"][0]["changes"][0]["value"]["messages"][0]["from"],
+            to_phone=payload["entry"][0]["changes"][0]["value"]["metadata"]["display_phone_number"],
+            content_jsonb=payload,
+            content_hash="",
+            message_type=payload["entry"][0]["changes"][0]["value"]["messages"][0]["type"],
+            status="DELIVERED",
+        )
+        async with async_session() as session:
+            try:
+                await session.execute(stmt)
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()  # duplicate delivery; ignore
+

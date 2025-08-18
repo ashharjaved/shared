@@ -7,8 +7,16 @@ from src.messaging.infrastructure.repositories import ChannelRepository, Inbound
 from src.shared.security import verify_hub_signature
 from src.config import settings
 from src.dependencies import get_session
+from src.platform.infrastructure.cache import get_cached
+import hmac, hashlib
 
 router = APIRouter(prefix="/api/v1/wa", tags=["whatsapp-webhook"])
+
+def _constant_time_eq(a: str, b: str) -> bool:
+    try:
+        return hmac.compare_digest(a, b)
+    except Exception:
+        return False
 
 @router.get("/webhook", response_class=Response)
 async def verify_webhook(q: WhatsAppVerifyQuery = Depends()):
@@ -60,3 +68,54 @@ async def inbound_webhook(request: Request, session: AsyncSession = Depends(get_
 
     await session.commit()
     return OkResponse(ok=True, details="Processed", data={"created": created, "updated": updated})
+
+async def receive_old(request: Request):
+    raw = await request.body()
+    tenant_id = request.headers.get("X-Tenant-Id")
+    configured = get_cached(tenant_id, "whatsapp.app_secret") if tenant_id else None
+    app_secret = (configured or settings.WHATSAPP_APP_SECRET).encode("utf-8")
+    sig = request.headers.get("X-Hub-Signature-256", "")
+    if not sig.startswith("sha256="):
+        raise HTTPException(status_code=401, detail="Missing signature")
+    expected = "sha256=" + hmac.new(app_secret, raw, hashlib.sha256).hexdigest()
+    if not _constant_time_eq(sig, expected):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+    # Idempotent persist -> ack fast
+    # (delegate to handler; it MUST be idempotent)
+    return {"status": "accepted"}
+
+@router.post("/{phone_number_id}")
+async def receive(phone_number_id: str, request: Request):
+    raw = await request.body()
+    sig = request.headers.get("X-Hub-Signature-256", "")
+    tenant_id = request.headers.get("X-Tenant-Id")
+    configured = get_cached(tenant_id, "whatsapp.app_secret") if tenant_id else None
+    #app_secret = await ConfigRepository.get_app_secret(phone_number_id) or settings.WHATSAPP_APP_SECRET
+    app_secret = (configured or settings.WHATSAPP_APP_SECRET)
+    if not _sig_valid(app_secret, raw, sig):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="invalid signature")
+    payload = await request.json()
+    # Minimal idempotent persist (repo raises on duplicate whatsapp_message_id)
+    await InboundRepository.persist_inbound(phone_number_id, payload)
+    return {"status": "ok"}
+
+def _sig_valid(app_secret: str, raw_body: bytes, provided: str) -> bool:
+    if not provided or not provided.startswith("sha256="):
+        return False
+    digest = hmac.new(app_secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(provided.split("=",1)[1], digest)
+
+@router.get("/{phone_number_id}")
+async def verify(phone_number_id: str, hub_mode: str, hub_challenge: str, hub_verify_token: str):
+    # per-tenant override via ConfigRepository, else fallback to settings
+    expected = settings.WHATSAPP_VERIFY_TOKEN
+    if hub_mode == "subscribe" and hub_verify_token == expected:
+        return int(hub_challenge)
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="verify failed")
+
+
+
+
+
+
+

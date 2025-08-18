@@ -4,7 +4,8 @@ from typing import Callable
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
-
+import uuid
+from src.shared.security import get_principal
 logger = logging.getLogger(__name__)
 
 class LoggingMiddleware(BaseHTTPMiddleware):
@@ -19,7 +20,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         if auth_header and auth_header.startswith("Bearer "):
             try:
                 import jwt
-                from ..config import settings
+                from src.config import settings
                 token = auth_header.split(" ", 1)[1]
                 payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALG])
                 tenant_id = payload.get("tenant_id", tenant_id)
@@ -53,3 +54,13 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                                                   "duration_ms": round(duration * 1000, 2),
                                                   "tenant_id": tenant_id, "user_id": user_id}, exc_info=True)
             raise
+
+
+class RequestContextMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        request.state.request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        principal = get_principal(request.headers.get("Authorization", "")) or {}
+        request.state.tenant_id = principal.__getattribute__("tenant_id")
+        resp: Response = await call_next(request)
+        resp.headers["X-Request-ID"] = request.state.request_id
+        return resp
