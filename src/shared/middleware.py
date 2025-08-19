@@ -4,7 +4,6 @@ from typing import Callable
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
-import uuid
 from jose import jwt
 from src.config import settings
 logger = logging.getLogger(__name__)

@@ -7,12 +7,7 @@ from src.platform.domain.services import TenantContextService
 
 # Dependencies
 from src.shared.security import get_principal  # Stage-1
-# Provide a session dependency compatible with shared.database
-async def get_db_session() -> AsyncSession:
-    # Expect shared.database to expose async_session maker named 'async_session'
-    from src.shared.database import async_session  # type: ignore
-    async with async_session() as session:
-        yield session
+from src.dependencies import get_session as get_db_session  # canonical AsyncSession DI
 
 router = APIRouter(prefix="/api/v1/config", tags=["Platform Config"])
 

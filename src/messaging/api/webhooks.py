@@ -20,8 +20,11 @@ def _constant_time_eq(a: str, b: str) -> bool:
         return False
 
 @router.get("/webhook", response_class=Response)
-async def verify_webhook(q: WhatsAppVerifyQuery = Depends()):
-    if q.hub_verify_token != settings.WHATSAPP_VERIFY_TOKEN:
+async def verify_webhook(request: Request, q: WhatsAppVerifyQuery = Depends()):
+    tenant_id = request.headers.get("X-Tenant-Id")
+    configured = get_cached(tenant_id, "whatsapp.verify_token") if tenant_id else None
+    expected = configured or settings.WHATSAPP_VERIFY_TOKEN
+    if q.hub_verify_token != expected:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Bad verify token")
     return Response(content=q.hub_challenge, media_type="text/plain")
 
@@ -29,7 +32,10 @@ async def verify_webhook(q: WhatsAppVerifyQuery = Depends()):
 async def inbound_webhook(request: Request, session: AsyncSession = Depends(get_session)):
     sig = request.headers.get("X-Hub-Signature-256")
     raw = await request.body()
-    if not verify_hub_signature(raw, settings.WHATSAPP_APP_SECRET, sig):
+    tenant_id = request.headers.get("X-Tenant-Id")
+    configured_secret = get_cached(tenant_id, "whatsapp.app_secret") if tenant_id else None
+    app_secret = configured_secret or settings.WHATSAPP_APP_SECRET
+    if not verify_hub_signature(raw, app_secret, sig):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
 
     try:
@@ -113,7 +119,6 @@ async def verify(phone_number_id: str, hub_mode: str, hub_challenge: str, hub_ve
     if hub_mode == "subscribe" and hub_verify_token == expected:
         return int(hub_challenge)
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="verify failed")
-# Legacy paths for tests/back-compat
 
 @legacy.get("/{phone_number_id}")
 async def legacy_verify(phone_number_id: str, hub_mode: str, hub_challenge: str, hub_verify_token: str):
@@ -122,9 +127,3 @@ async def legacy_verify(phone_number_id: str, hub_mode: str, hub_challenge: str,
 @legacy.post("/{phone_number_id}")
 async def legacy_receive(phone_number_id: str, request: Request):
     return await receive(phone_number_id, request)
-
-
-
-
-
-

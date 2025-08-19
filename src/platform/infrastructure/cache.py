@@ -76,7 +76,7 @@ def set_cached(tenant_id: UUID, key: str, value: Any) -> None:
 
 
 def invalidate(tenant_id: UUID, key: str) -> None:
-    c = get_cache(ttl_seconds=30)
+    c = get_cache(ttl_seconds=settings.CONFIG_TTL_SECONDS)
     if key:
         with c._lock:
             c._store.pop((str(tenant_id), key), None)
