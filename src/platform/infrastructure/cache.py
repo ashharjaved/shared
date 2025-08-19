@@ -69,10 +69,10 @@ def get_cache(ttl_seconds: int) -> InMemoryTTLCache:
 
 # Module-level helpers used across the app
 def get_cached(tenant_id: UUID, key: str) -> Optional[Any]:
-    return get_cache(ttl_seconds=30).get(tenant_id, key)  # default used unless caller sets explicitly
+    return get_cache(ttl_seconds=settings.CONFIG_TTL_SECONDS).get(tenant_id, key)
 
 def set_cached(tenant_id: UUID, key: str, value: Any) -> None:
-    get_cache(ttl_seconds=30).set(tenant_id, key, value)
+    get_cache(ttl_seconds=settings.CONFIG_TTL_SECONDS).set(tenant_id, key, value)
 
 
 def invalidate(tenant_id: UUID, key: str) -> None:

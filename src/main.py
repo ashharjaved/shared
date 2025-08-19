@@ -2,7 +2,6 @@ from __future__ import annotations
 import logging, uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from src.identity.api.routes import router as auth_router
 from src.identity.api.routes import router as identity_router
 from src.platform.api.routes import router as platform_config_router
 from src.messaging.api.routes import router as messaging_routes
@@ -31,8 +30,6 @@ def create_app() -> FastAPI:
     )
     add_exception_handlers(app)
     app.include_router(platform_config_router)
-
-    app.include_router(auth_router)
     return app
 
 app = create_app()
@@ -53,4 +50,3 @@ async def add_request_id_and_logging(request: Request, call_next):
 app.include_router(identity_router)
 app.include_router(messaging_webhooks)  # public (signature verified)
 app.include_router(messaging_routes)    # protected (Bearer)
-#app.include_router(legacy)

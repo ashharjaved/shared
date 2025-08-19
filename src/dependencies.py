@@ -5,9 +5,8 @@ from typing import AsyncGenerator, Optional
 from fastapi import Depends, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .identity.domain.entities import Principal
-from .shared.database import async_session_factory
-from .shared.security import get_principal
+from src.shared.database import async_session_factory
+from src.shared.security import get_principal, Principal
 
 
 async def get_tenant_context(
@@ -16,7 +15,7 @@ async def get_tenant_context(
 ) -> Optional[str]:
     """Resolve the tenant identifier for the current request."""
     # Prefer tenant from JWT; otherwise use header (bootstrap).
-    return principal.tenant_id if principal else x_tenant_id
+    return Principal["tenant_id"] if Principal else x_tenant_id
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
