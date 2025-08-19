@@ -9,8 +9,28 @@ async def test_whatsapp_get_verify_ok(app_client: AsyncClient):
     assert r.json() == 42
 
 async def test_whatsapp_post_signature_ok(app_client: AsyncClient):
-    body = {"entry":[{"changes":[{"value":{"messages":[{"id":"wamid.X","from":"+9112345","type":"text"}],
-                                               "metadata":{"display_phone_number":"+9112345"}}]}]}]}
+    body = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "id": "wamid.X",
+                                    "from": "+9112345",
+                                    "type": "text"
+                                }
+                            ],
+                            "metadata": {
+                                "display_phone_number": "+9112345"
+                            }
+                        }
+                    }
+                ]
+            }
+        ]
+    }
     raw = json.dumps(body).encode()
     sig = "sha256=" + hmac.new(settings.WHATSAPP_APP_SECRET.encode(), raw, hashlib.sha256).hexdigest()
     r = await app_client.post("/webhooks/whatsapp/123", headers={"X-Hub-Signature-256": sig}, json=body)
