@@ -10,13 +10,16 @@ Important:
 """
 from uuid import UUID
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from sqlalchemy import ForeignKey, text, String, CheckConstraint, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import JSONB, ENUM
 
-from shared.database import Base
+from src.shared.database import Base
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.messaging.infrastructure.models import WhatsappChannel
 
 class MenuFlow(Base):
     """Conversation menu flow definition."""
@@ -62,7 +65,9 @@ class ConversationSession(Base):
     deleted_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     
     # Relationships
-    channel: Mapped['WhatsappChannel'] = relationship(back_populates='sessions')
+    channel: Mapped["WhatsappChannel"] = relationship(
+        "WhatsappChannel", back_populates="sessions", lazy="raise"
+    )
     current_menu: Mapped[Optional['MenuFlow']] = relationship(back_populates='sessions')
     
     __table_args__ = (

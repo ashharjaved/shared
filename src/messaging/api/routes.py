@@ -10,7 +10,7 @@ from src.messaging.infrastructure.whatsapp_client import build_outbound_payload
 from src.shared.security import get_principal
 from src.identity.domain.entities import Principal
 from src.dependencies import get_session
-from src.config import settings
+
 
 router = APIRouter(prefix="/api/v1/wa", tags=["whatsapp"])
 

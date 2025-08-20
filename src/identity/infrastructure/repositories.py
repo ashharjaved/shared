@@ -8,7 +8,8 @@ from .models import Tenant, User
 async def _set_tenant(session: AsyncSession, tenant_id: str | UUID | None) -> None:
     # RLS guard using app.jwt_tenant GUC; no-op for platform-scoped tables.
     if tenant_id:
-        await session.execute(text("set local app.jwt_tenant = :t"), {"t": str(tenant_id)})
+        await session.execute(text("SELECT set_config('app.jwt_tenant', :tid, true)"), {"tid": str(tenant_id)},)
+
 
 class TenantRepository:
     def __init__(self, session: AsyncSession):
@@ -27,10 +28,10 @@ class TenantRepository:
         rows = (await self.session.execute(stmt)).scalars().all()
         return rows
 
-    async def by_id(self, tenant_id: str) -> Optional[Tenant]:
+    async def by_id(self, tenant_id: UUID) -> Optional[Tenant]:
         return (await self.session.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
 
-    async def set_status(self, tenant_id: str, *, is_active: bool) -> bool:
+    async def set_status(self, tenant_id: UUID, *, is_active: bool) -> bool:
         res = await self.session.execute(
             update(Tenant).where(Tenant.id == tenant_id).values(is_active=is_active)
         )
@@ -38,7 +39,7 @@ class TenantRepository:
 
     async def update(
         self,
-        tenant_id: str,
+        tenant_id: UUID,
         *,
         name: Optional[str] = None,
         tenant_type: Optional[str] = None,
@@ -64,7 +65,7 @@ class TenantRepository:
 
     async def update_status(
         self,
-        tenant_id: str,
+        tenant_id: UUID,
         *,
         is_active: Optional[bool] = None,
         subscription_status: Optional[str] = None,
@@ -85,22 +86,22 @@ class UserRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def create(self, tenant_id: str, *, email: str, password_hash: str, roles: List[str]) -> User:
+    async def create(self, tenant_id: UUID, *, email: str, password_hash: str, roles: List[str]) -> User:
         await _set_tenant(self.session, tenant_id)
         u = User(tenant_id=tenant_id, email=email, password_hash=password_hash, roles=list(sorted(set(roles))))
         self.session.add(u)
         await self.session.flush()
         return u
 
-    async def by_id(self, tenant_id: str, user_id: str) -> Optional[User]:
+    async def by_id(self, tenant_id: UUID, user_id: str) -> Optional[User]:
         await _set_tenant(self.session, tenant_id)
         return (await self.session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
 
-    async def by_email(self, tenant_id: str, email: str) -> Optional[User]:
+    async def by_email(self, tenant_id: UUID, email: str) -> Optional[User]:
         await _set_tenant(self.session, tenant_id)
         return (await self.session.execute(select(User).where(User.email == email))).scalar_one_or_none()
 
-    async def assign_role(self, tenant_id: str, user_id: str, role: str) -> Optional[User]:
+    async def assign_role(self, tenant_id: UUID, user_id: str, role: str) -> Optional[User]:
         await _set_tenant(self.session, tenant_id)
         user = await self.by_id(tenant_id, user_id)
         if not user:
@@ -110,6 +111,6 @@ class UserRepository:
             await self.session.flush()
         return user
 
-    async def roles_of(self, tenant_id: str, user_id: str) -> List[str]:
+    async def roles_of(self, tenant_id: UUID, user_id: str) -> List[str]:
         user = await self.by_id(tenant_id, user_id)
         return user.roles if user else []

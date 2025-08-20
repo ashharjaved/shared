@@ -16,7 +16,12 @@ from sqlalchemy import ForeignKey, text, String, CheckConstraint, UniqueConstrai
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import JSONB, ENUM
 
+
 from src.shared.database import Base
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from src.conversation.infrastructure.models import ConversationSession
+    from src.identity.infrastructure.models import Tenant
 
 class WhatsappChannel(Base):
     """WhatsApp Business API channel configuration."""
@@ -41,13 +46,14 @@ class WhatsappChannel(Base):
     # Relationships
     tenant: Mapped['Tenant'] = relationship(back_populates='channels')
     messages: Mapped[List['Message']] = relationship(back_populates='channel')
-    sessions: Mapped[List['ConversationSession']] = relationship(back_populates='channel')
+    sessions: Mapped[list["ConversationSession"]] = relationship(
+        "ConversationSession", back_populates="channel", lazy="raise"
+    )
     
     __table_args__ = (
         UniqueConstraint('tenant_id', 'business_phone', name='uq_channels__tenant_business'),
         CheckConstraint("business_phone ~ '^\\+[1-9]\\d{1,14}$'", name='chk_channels__phone_e164'),
         Index('ix_channels__tenant_active', 'tenant_id', 'is_active'),
-        # Index('ix_channels__tenant_created', 'tenant_id', 'created_at', postgresql_desc=True),
         Index('ix_channels__tenant_created', 'tenant_id', text('created_at DESC'))
     )
 
