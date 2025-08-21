@@ -1,4 +1,5 @@
 from __future__ import annotations
+from uuid import UUID
 from passlib.context import CryptContext
 from ..infrastructure.repositories import TenantRepository, UserRepository
 from .commands import CreateTenant, CreateUser, AssignRole, UpdateTenant, UpdateTenantStatus
@@ -37,13 +38,13 @@ async def handle_update_tenant_status(cmd: UpdateTenantStatus, repo: TenantRepos
 # Users
 async def handle_create_user(cmd: CreateUser, repo: UserRepository):
     pw_hash = pwd_ctx.hash(cmd.password)
-    return await repo.create(cmd.tenant_id, email=cmd.email, password_hash=pw_hash, roles=cmd.roles)
+    return await repo.create(cmd.tenant_id, email=cmd.email, password_hash=pw_hash, role=cmd.role)
 
 async def handle_get_user(q: GetUser, repo: UserRepository):
-    return await repo.by_id(q.tenant_id, q.user_id)
+    return await repo.by_id(q.tenant_id, UUID(q.user_id))
 
 async def handle_assign_role(cmd: AssignRole, repo: UserRepository):
-    return await repo.assign_role(cmd.tenant_id, cmd.user_id, cmd.role)
+    return await repo.assign_role(cmd.tenant_id, UUID(cmd.user_id), cmd.role)
 
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_ctx.verify(plain, hashed)

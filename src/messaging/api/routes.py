@@ -3,14 +3,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.messaging.api.schemas import OnboardingRequest, ChannelResponse, OutboundRequest, OkResponse
-from src.messaging.application.commands import LinkChannel, PrepareOutboundMessage
+from src.messaging.application.commands import LinkChannel
 from src.messaging.application.handlers import MessagingHandlers
 from src.messaging.infrastructure.repositories import ChannelRepository
 from src.messaging.infrastructure.whatsapp_client import build_outbound_payload
 from src.shared.security import get_principal
 from src.identity.domain.entities import Principal
 from src.dependencies import get_session
-
+from src.config import settings
 
 router = APIRouter(prefix="/api/v1/wa", tags=["whatsapp"])
 

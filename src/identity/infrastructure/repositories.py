@@ -86,14 +86,15 @@ class UserRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def create(self, tenant_id: UUID, *, email: str, password_hash: str, roles: List[str]) -> User:
+    async def create(self, tenant_id: UUID, *, email: str, password_hash: str, role: str) -> User:
         await _set_tenant(self.session, tenant_id)
-        u = User(tenant_id=tenant_id, email=email, password_hash=password_hash, roles=list(sorted(set(roles))))
+        u = User(tenant_id=tenant_id, email=email, password_hash=password_hash, role=role)
+        print(u)
         self.session.add(u)
         await self.session.flush()
         return u
 
-    async def by_id(self, tenant_id: UUID, user_id: str) -> Optional[User]:
+    async def by_id(self, tenant_id: UUID, user_id: UUID) -> Optional[User]:
         await _set_tenant(self.session, tenant_id)
         return (await self.session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
 
@@ -101,16 +102,17 @@ class UserRepository:
         await _set_tenant(self.session, tenant_id)
         return (await self.session.execute(select(User).where(User.email == email))).scalar_one_or_none()
 
-    async def assign_role(self, tenant_id: UUID, user_id: str, role: str) -> Optional[User]:
+    async def assign_role(self, tenant_id: UUID, user_id: UUID, role: str) -> Optional[User]:
         await _set_tenant(self.session, tenant_id)
         user = await self.by_id(tenant_id, user_id)
         if not user:
             return None
-        if role not in user.roles:
-            user.roles = sorted(set([*user.roles, role]))
+        if user.role != role:
+            user.role = role
             await self.session.flush()
+
         return user
 
-    async def roles_of(self, tenant_id: UUID, user_id: str) -> List[str]:
+    async def roles_of(self, tenant_id: UUID, user_id: UUID) -> List[str]:
         user = await self.by_id(tenant_id, user_id)
-        return user.roles if user else []
+        return [user.role] if user else []

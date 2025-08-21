@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 from uuid import UUID
 
 # Tenants
@@ -8,7 +8,7 @@ from uuid import UUID
 class CreateTenant:
     name: str
     tenant_type: str = "CLIENT"
-    subscription_plan: str = "basic"
+    subscription_plan: str = "BASIC"
     billing_email: Optional[str] = None
 
 @dataclass
@@ -31,7 +31,7 @@ class CreateUser:
     tenant_id: UUID
     email: str
     password: str
-    roles: List[str]
+    role: str = "STAFF"
 
 @dataclass
 class AssignRole:

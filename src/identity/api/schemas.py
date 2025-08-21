@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Optional
+from typing import Optional
 from pydantic import BaseModel, EmailStr, Field
 from uuid import UUID
 
@@ -7,7 +7,7 @@ from uuid import UUID
 class TenantCreate(BaseModel):
     name: str = Field(min_length=2, max_length=255)
     tenant_type: str = "CLIENT"  # PLATFORM_OWNER | RESELLER | CLIENT
-    subscription_plan: str = "basic"
+    subscription_plan: str = "BASIC"  # BASIC | PREMIUM | ENTERPRISE
     billing_email: Optional[EmailStr] = None
 
 class TenantUpdate(BaseModel):
@@ -29,15 +29,16 @@ class TenantRead(BaseModel):
 
 # ---- Users ----
 class UserCreate(BaseModel):
+    tenant_id: Optional[UUID] = None
     email: EmailStr
     password: str = Field(min_length=8)
-    roles: List[str] = ["STAFF"]
+    role: str = "STAFF"
 
 class UserRead(BaseModel):
     id: UUID
     tenant_id: UUID
     email: EmailStr
-    roles: List[str]
+    role: str
     is_active: bool
     is_verified: bool
 

@@ -6,8 +6,8 @@ from typing import List, Optional
 from sqlalchemy import text
 from fastapi import Header
 from jose import jwt
-from src.config import Settings
-
+from src.config import settings
+import debugpy
 from .schemas import (
     TenantCreate, TenantRead, TenantUpdate, TenantStatusUpdate,
     UserCreate, UserRead, TokenRequest, TokenResponse
@@ -16,9 +16,9 @@ from ..application.commands import (
     CreateTenant, CreateUser, AssignRole,
     UpdateTenant, UpdateTenantStatus
 )
-from ..application.queries import GetTenant, GetUser
+
 from ..application.handlers import (
-    handle_create_tenant, handle_get_tenant, handle_create_user, handle_get_user,
+    handle_create_tenant, handle_create_user,
     handle_assign_role, verify_password, handle_update_tenant, handle_update_tenant_status
 )
 from src.shared.security import create_access_token, require_roles, get_principal, get_tenant_from_header
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api/v1/auth", tags=["Identity"])
 
 # ---- Tenants (platform scoped) ----
 @router.post("/tenants", response_model=TenantRead, status_code=status.HTTP_201_CREATED,
-             dependencies=[Depends(require_roles("PLATFORM_OWNER"))])
+             dependencies=[Depends(require_roles("SUPER_ADMIN"))])
 async def create_tenant(payload: TenantCreate, session: AsyncSession = Depends(get_session)):
     repo = TenantRepository(session)
     t = await handle_create_tenant(CreateTenant(**payload.dict()), repo)
@@ -39,8 +39,11 @@ async def create_tenant(payload: TenantCreate, session: AsyncSession = Depends(g
         subscription_status=t.subscription_status, is_active=t.is_active
     )
 
-@router.get("/tenants", response_model=List[TenantRead], dependencies=[Depends(require_roles("PLATFORM_OWNER"))])
+
+@router.get("/tenants", response_model=List[TenantRead], dependencies=[Depends(require_roles("SUPER_ADMIN"))])
 async def list_tenants(session: AsyncSession = Depends(get_session)):
+    """List all tenants, including inactive ones."""
+    # Note: This is for platform owners only, so we don't filter by tenant_id
     repo = TenantRepository(session)
     rows = await repo.list(active_only=False)
     return [TenantRead(id=t.id, name=t.name, tenant_type=t.tenant_type,
@@ -48,7 +51,7 @@ async def list_tenants(session: AsyncSession = Depends(get_session)):
 
 # NEW: update tenant fields
 @router.patch("/tenants/{tenant_id}", response_model=TenantRead,
-              dependencies=[Depends(require_roles("PLATFORM_OWNER"))])
+              dependencies=[Depends(require_roles("PLATFORM_OWNER","SUPER_ADMIN"))])
 async def update_tenant(tenant_id: UUID, payload: TenantUpdate, session: AsyncSession = Depends(get_session)):
     repo = TenantRepository(session)
     t = await handle_update_tenant(UpdateTenant(tenant_id=tenant_id, **payload.dict()), repo)
@@ -61,7 +64,7 @@ async def update_tenant(tenant_id: UUID, payload: TenantUpdate, session: AsyncSe
     )
 
 # Existing status-by-path (kept for backward compat)
-@router.post("/tenants/{tenant_id}/status/{status}", dependencies=[Depends(require_roles("PLATFORM_OWNER"))])
+@router.post("/tenants/{tenant_id}/status/{status}", dependencies=[Depends(require_roles("SUPER_ADMIN"))])
 async def set_tenant_status(tenant_id: UUID, status: str, session: AsyncSession = Depends(get_session)):
     repo = TenantRepository(session)
     if status not in {"activate", "deactivate"}:
@@ -74,7 +77,7 @@ async def set_tenant_status(tenant_id: UUID, status: str, session: AsyncSession 
 
 # NEW: status update via body (supports is_active and/or subscription_status)
 @router.patch("/tenants/{tenant_id}/status",
-              dependencies=[Depends(require_roles("PLATFORM_OWNER"))])
+              dependencies=[Depends(require_roles("PLATFORM_OWNER", "RESELLER"))])
 async def patch_tenant_status(tenant_id: UUID, payload: TenantStatusUpdate, session: AsyncSession = Depends(get_session)):
     if payload.is_active is None and payload.subscription_status is None:
         raise HTTPException(status_code=400, detail="Provide is_active and/or subscription_status")
@@ -112,7 +115,7 @@ async def issue_token(
     token = create_access_token(
         subject=user.email,
         tenant_id=user.tenant_id,
-        roles=[str(r) for r in user.roles]  # ensure simple list[str]
+        role=[user.role]  # ensure simple list[str]
     )
     return TokenResponse(access_token=token, expires_in=settings.JWT_EXPIRE_MIN * 60)
     
@@ -121,34 +124,51 @@ async def issue_token(
 @router.post("/users", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 async def create_user(
     payload: UserCreate,
-    principal: Principal = Depends(require_roles("PLATFORM_OWNER", "RESELLER")),
+    principal: Principal = Depends(require_roles("SUPER_ADMIN", "RESELLER", "TENANT_ADMIN")),
     session: AsyncSession = Depends(get_session),
 ):
-    if "PLATFORM_OWNER" in principal.roles or "RESELLER" in principal.roles:
-        pass
-    else:
-        if principal.tenant_id != payload.tenant_id:
-            raise HTTPException(status_code=403, detail="Cross-tenant user creation is not allowed")
+    debugpy.breakpoint()
+    # Determine target tenant for creation:
+    # - SUPER_ADMIN / RESELLER: can set payload.tenant_id (must be provided).
+    # - Others (e.g., TENANT_ADMIN): default to caller's tenant if not provided; cross-tenant disallowed.
+    is_privileged = bool({"SUPER_ADMIN", "RESELLER"} & principal.role)
+    target_tenant_id = payload.tenant_id or principal.tenant_id
+
+    if not is_privileged and payload.tenant_id and payload.tenant_id != principal.tenant_id:
+        raise HTTPException(status_code=403, detail="Cross-tenant user creation is not allowed")
+    if is_privileged and not target_tenant_id:
+        # For privileged callers, tenant_id must be explicit (they may not belong to the target tenant)
+        raise HTTPException(status_code=400, detail="tenant_id is required for privileged user creation")
+
+
     user_repo = UserRepository(session)
-    u = await handle_create_user(CreateUser(**payload.dict()), user_repo)
+    u = await handle_create_user(
+        CreateUser(
+            tenant_id=target_tenant_id,
+            email=payload.email,
+            password=payload.password,
+            role=payload.role,
+        ),
+        user_repo,
+    )
     await session.commit()
-    return UserRead(id=u.id, tenant_id=u.tenant_id, email=u.email, roles=u.roles, is_active=u.is_active, is_verified=u.is_verified)
+    return UserRead(id=u.id, tenant_id=u.tenant_id, email=u.email, role=u.role, is_active=u.is_active, is_verified=u.is_verified)
 
 @router.get("/users/{user_id}", response_model=UserRead)
 async def get_user(
-    user_id: str,
-    principal: Principal = Depends(require_roles("STAFF", "PLATFORM_OWNER", "RESELLER")),
+    user_id: UUID,
+    principal: Principal = Depends(require_roles("STAFF", "PLATFORM_OWNER", "RESELLER","SUPER_ADMIN")),
     session: AsyncSession = Depends(get_session),
 ):
     user_repo = UserRepository(session)
     u = await user_repo.by_id(principal.tenant_id, user_id)
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    if principal.user_id != u.id and not principal.has_any_role("PLATFORM_OWNER", "RESELLER"):
+    if principal.user_id != u.id and not principal.has_any_role("SUPER-ADMIN", "RESELLER"):
         raise HTTPException(status_code=403, detail="Forbidden")
-    return UserRead(id=u.id, tenant_id=u.tenant_id, email=u.email, roles=u.roles, is_active=u.is_active, is_verified=u.is_verified)
+    return UserRead(id=u.id, tenant_id=u.tenant_id, email=u.email, role=u.role, is_active=u.is_active, is_verified=u.is_verified)
 
-@router.post("/users/{user_id}/roles", dependencies=[Depends(require_roles("PLATFORM_OWNER", "RESELLER"))])
+@router.post("/users/{user_id}/roles", dependencies=[Depends(require_roles("PLATFORM_OWNER", "RESELLER","SUPER_ADMIN"))])
 async def assign_user_roles(
     user_id: str,
     roles: List[str],
@@ -163,7 +183,7 @@ async def assign_user_roles(
     await session.commit()
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"ok": True, "roles": u.roles}
+    return {"ok": True, "roles": u.role}
 
 @router.get("/whoami")
 async def whoami(
@@ -272,9 +292,9 @@ async def whoami_db(
 
     tid = str(claims.get("tenant_id") or "").strip()
     sub = str(claims.get("email") or claims.get("preferred_username") or claims.get("sub") or "").strip()
-    roles = claims.get("roles") or []
-    if not isinstance(roles, list):
-        roles = [str(roles)]
+    role = claims.get("roles")
+    if not isinstance(role, list):
+        role = [str(role)]
     if not tid:
         raise HTTPException(status_code=400, detail="token missing tenant_id")
 
@@ -299,7 +319,7 @@ async def whoami_db(
     )
     user_id = res.scalar_one_or_none()
 
-    return {"user_id": user_id, "tenant_id": tid, "email": sub or None, "roles": roles}
+    return {"user_id": user_id, "tenant_id": tid, "email": sub or None, "role": role}
 
 
 @router.get("/_debug/whoami")
@@ -330,6 +350,8 @@ async def debug_whoami(
         {"tid": str(principal.tenant_id)},
     )
     m = res.mappings().first()
+    if m is None:
+        raise HTTPException(status_code=404, detail="No debug info found for tenant")
     return {
         "db": m["db"],
         "tenant_guc": m["tenant_guc"],
@@ -392,6 +414,8 @@ async def debug_probe(
             text("SELECT current_database() AS db, current_setting('app.jwt_tenant', true) AS tenant_guc")
         )
         row = res.mappings().first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="No database info found")
         return {
             "db": row["db"],
             "tenant_guc": row["tenant_guc"],

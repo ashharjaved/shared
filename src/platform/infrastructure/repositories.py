@@ -1,7 +1,7 @@
 from typing import Any, List, Optional, Tuple
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from .models import TenantConfiguration
 
@@ -33,7 +33,7 @@ class ConfigRepository:
             index_elements=[TenantConfiguration.tenant_id, TenantConfiguration.config_key],
             set_={
                 "config_value": value,
-                "updated_at": None  # server trigger will set updated_at; keep None to not override
+                "updated_at": func.now()  # server trigger will set updated_at; keep None to not override
             }
         ).returning(TenantConfiguration.config_key, TenantConfiguration.config_value)
         res = await self.session.execute(stmt)

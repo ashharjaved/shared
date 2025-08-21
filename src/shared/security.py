@@ -2,26 +2,25 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional, TypedDict
+from typing import Any, List, Optional
 from uuid import UUID
 
+import debugpy
 from fastapi import Depends, Header, HTTPException, status, Security
 from jose import jwt, JWTError
 from jose.exceptions import ExpiredSignatureError
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
-from src.shared.database import get_session
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from src.identity.domain.entities import Principal
+from src.identity.domain.value_objects import UserRole
+from src.shared.utils import _to_uuid_or_none
 # -----------------------------------------------------------------------------
 # Public types
 # -----------------------------------------------------------------------------
-ALLOWED_ROLES = {"PLATFORM_OWNER", "RESELLER","CLIENT"}
 
-bearer = HTTPBearer(auto_error=False)
-
+bearer_scheme = HTTPBearer(auto_error=False)
+#bearer_scheme = HTTPBearer(auto_error=False)
 
 # -----------------------------------------------------------------------------
 # JWT helpers
@@ -30,7 +29,7 @@ def create_access_token(
     *,
     subject: str,
     tenant_id: UUID,
-    roles: List[str],
+    role: List[str],
     expires_minutes: Optional[int] = None,
 ) -> str:
     """
@@ -41,11 +40,14 @@ def create_access_token(
     payload = {
         "sub": subject,
         "tenant_id": tenant_id,
-        "roles": roles,
+        "roles": role,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=exp_min)).timestamp()),
     }
     secret = getattr(settings.JWT_SECRET, "get_secret_value", lambda: settings.JWT_SECRET)()
+    if hasattr(secret, "get_secret_value"):
+        secret = secret.get_secret_value()
+    secret = str(secret)
     return jwt.encode(payload, secret, algorithm=settings.JWT_ALG)
 
 def _secret_alg() -> tuple[str, str]:
@@ -62,6 +64,9 @@ def decode_token(token: str) -> dict:
     """
     try:
         secret = getattr(settings.JWT_SECRET, "get_secret_value", lambda: settings.JWT_SECRET)()
+        if hasattr(secret, "get_secret_value"):
+            secret = secret.get_secret_value()
+        secret = str(secret)
         return jwt.decode(token, secret, algorithms=[settings.JWT_ALG])
     except ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
@@ -84,80 +89,95 @@ def _as_roles(v: Any) -> set[str]:
         out = {k.upper() for k, ok in v.items() if ok}
     elif isinstance(v, Iterable):
         out = {str(x).upper() for x in v if isinstance(x, str)}
-    if ALLOWED_ROLES:
-        out = {r for r in out if r in ALLOWED_ROLES}
+    if UserRole:
+        out = {r for r in out if r in UserRole.__members__}
     return out
 
 def _get_secret_and_alg() -> tuple[str, str]:
     raw = settings.JWT_SECRET
-    secret = raw.get_secret_value() if hasattr(raw, "get_secret_value") else (raw if isinstance(raw, str) else "")
+    secret = raw.get_secret_value() if hasattr(raw, "get_secret_value") else str(raw or "")
     if not secret:
-        # Misconfiguration – .env not loaded or empty
         raise HTTPException(status_code=500, detail="JWT secret not configured")
-    alg = getattr(settings, "JWT_ALG", "HS256")
-    return secret, alg
+    return secret, getattr(settings, "JWT_ALG", "HS256")
 # -----------------------------------------------------------------------------
 # FastAPI dependencies
 # -----------------------------------------------------------------------------
-async def get_principal(credentials: HTTPAuthorizationCredentials | None = Security(bearer)) -> Principal | None:
-    """
-    Parse + verify JWT ONLY. No DB calls here (so /whoami can't 500).
-    Returns None if no/invalid header on public routes.
-    """
+async def get_principal(credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme)) -> Principal | None:
     if credentials is None or (credentials.scheme or "").lower() != "bearer":
         return None
+    
     token = (credentials.credentials or "").strip()
-    secret, alg = _secret_alg()
+    secret, alg = _get_secret_and_alg()
     try:
         claims = jwt.decode(token, secret, algorithms=[alg])
+        # 👇 Add debug print here
+        print("JWT roles raw:", claims.get("roles"))
     except ExpiredSignatureError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+        raise HTTPException(status_code=401, detail="Token expired")
     except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # user_id may be a UUID (preferred) or an email/username.
+    user_raw = _pick(claims, "user_id", "uid", "userId", "u_id")
+    user_id = _to_uuid_or_none(user_raw)
 
-    user_id = _pick(claims, "user_id", "uid", "sub")
+    # tenant is required and must be a UUID
     tenant  = _pick(claims, "tenant_id", "tenantId", "tid")
+    try:
+        tenant_uuid = UUID(str(tenant))
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or missing tenant claim")
+    
+    # email from dedicated claims or fall back to 'sub' only for email
     email   = _pick(claims, "email", "preferred_username")
     if not email:
-        # If sub looks like an email, use it as email too
-        sub_val = _pick(claims, "sub")
-        if sub_val and "@" in str(sub_val):
-            email = str(sub_val)
-
-    def _as_uuid(x):
-        try:
-            return UUID(str(x)) if x else None
-        except Exception:
-            return None
+        sub = _pick(claims, "sub")
+        email = sub if sub and "@" in str(sub) else None
+    
+    roles = _as_roles(_pick(claims, "roles", "role", "permissions", "scopes"))
 
     return Principal(
-        user_id=_as_uuid(user_id),
-        tenant_id=_as_uuid(tenant),
+        user_id=user_id,
+        tenant_id=tenant_uuid,
         email=email,
-        roles=_as_roles(_pick(claims, "roles", "role", "permissions", "scopes")),
+        role=roles,
     )
 
+# def require_roles_notinuse(*required: str):
+#     req = {r.upper() for r in required}
+#     async def _dep(
+#         principal: Principal | None = Depends(get_principal),
+#         session: AsyncSession = Depends(get_session),
+#     ) -> Principal:
+#         if principal is None:
+#             raise HTTPException(status_code=401, detail="Authentication required")
+#         if not principal.roles or principal.roles.isdisjoint(req):
+#             raise HTTPException(status_code=403, detail="Insufficient role")
+#         # Try to set RLS tenant for this transaction; ignore if DB doesn’t support the GUC
+#         if principal.tenant_id:
+#             try:
+#                 await session.execute(text("SELECT set_config('app.jwt_tenant', :tid, true)"), {"tid": str(principal.tenant_id)},
+# )
+
+#             except Exception:
+#                 pass
+#         return principal
+#     return _dep
+
 def require_roles(*required: str):
+    """
+    FastAPI dependency to enforce RBAC. This does NOT touch the DB.
+    Tenant GUC (app.jwt_tenant) is set by src.shared.database.get_session().
+    """
+    debugpy.breakpoint()
     req = {r.upper() for r in required}
-    async def _dep(
-        principal: Principal | None = Depends(get_principal),
-        session: AsyncSession = Depends(get_session),
-    ) -> Principal:
+    async def _dep(principal: Principal | None = Depends(get_principal)) -> Principal:
         if principal is None:
             raise HTTPException(status_code=401, detail="Authentication required")
-        if not principal.roles or principal.roles.isdisjoint(req):
+        if not principal.role or principal.role.isdisjoint(req):
             raise HTTPException(status_code=403, detail="Insufficient role")
-        # Try to set RLS tenant for this transaction; ignore if DB doesn’t support the GUC
-        if principal.tenant_id:
-            try:
-                await session.execute(text("SELECT set_config('app.jwt_tenant', :tid, true)"), {"tid": str(principal.tenant_id)},
-)
-
-            except Exception:
-                pass
         return principal
     return _dep
-
 # -----------------------------------------------------------------------------
 # Webhook signature verification (used by messaging webhooks)
 # -----------------------------------------------------------------------------

@@ -14,7 +14,7 @@ from typing import List, Optional
 
 from sqlalchemy import ForeignKey, text, String, CheckConstraint, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import CITEXT, ARRAY
+from sqlalchemy.dialects.postgresql import CITEXT
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum, CITEXT
 
 from src.shared.database import Base
@@ -76,7 +76,7 @@ class User(Base):
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey('tenants.id'), nullable=False)
     email: Mapped[str] = mapped_column(CITEXT, nullable=False)
     password_hash: Mapped[str] = mapped_column(nullable=False)
-    roles: Mapped[str] = mapped_column(USER_ROLE_ENUM, nullable=False, server_default=text("'STAFF'"))
+    role: Mapped[str] = mapped_column(USER_ROLE_ENUM, nullable=False, server_default=text("'STAFF'"))
     is_active: Mapped[bool] = mapped_column(nullable=False, server_default=text('true'))
     is_verified: Mapped[bool] = mapped_column(nullable=False, server_default=text('false'))
     failed_login_attempts: Mapped[int] = mapped_column(nullable=False, server_default=text('0'))
@@ -91,7 +91,7 @@ class User(Base):
     
     __table_args__ = (
         UniqueConstraint('tenant_id', 'email', name='uq_users__tenant_email'),
-        CheckConstraint("roles IS NOT NULL", name="chk_users__roles_nonempty"),
+        CheckConstraint("role IS NOT NULL", name="chk_users__roles_nonempty"),
         Index('ix_users__tenant_active', 'tenant_id', 'is_active'),
         Index('ix_users__failed_attempts', 'failed_login_attempts', postgresql_where=text('failed_login_attempts > 0')),
     )

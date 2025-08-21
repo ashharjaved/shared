@@ -12,7 +12,7 @@ from uuid import UUID
 from datetime import datetime
 from typing import Optional, List
 
-from sqlalchemy import ForeignKey, text, String, CheckConstraint, UniqueConstraint, Index
+from sqlalchemy import ForeignKey, text, String, CheckConstraint, UniqueConstraint, Index, ForeignKeyConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import JSONB, ENUM
 
@@ -63,8 +63,8 @@ class Message(Base):
     
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey('tenants.id'), nullable=False)
-    channel_id: Mapped[UUID] = mapped_column(ForeignKey('whatsapp_channels.id'), nullable=False)
-    whatsapp_message_id: Mapped[Optional[str]] = mapped_column(nullable=True, unique=True)
+    channel_id: Mapped[UUID] = mapped_column(nullable=False)
+    whatsapp_message_id: Mapped[Optional[str]] = mapped_column(nullable=True)
     direction: Mapped[str] = mapped_column(ENUM('INBOUND', 'OUTBOUND', name='message_direction_enum'), nullable=False)
     from_phone: Mapped[str] = mapped_column(String(20), nullable=False)
     to_phone: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -74,7 +74,7 @@ class Message(Base):
     status: Mapped[str] = mapped_column(ENUM('QUEUED', 'SENT', 'DELIVERED', 'READ', 'FAILED', name='message_status_enum'), nullable=False)
     error_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     retry_count: Mapped[int] = mapped_column(nullable=False, server_default=text('0'))
-    created_at: Mapped[datetime] = mapped_column(server_default=text('now()'))
+    created_at: Mapped[datetime] = mapped_column(primary_key=True, server_default=text('now()'))
     delivered_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     status_updated_at: Mapped[datetime] = mapped_column(server_default=text('now()'))
     deleted_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
@@ -83,11 +83,18 @@ class Message(Base):
     channel: Mapped['WhatsappChannel'] = relationship(back_populates='messages')
     
     __table_args__ = (
+        UniqueConstraint('whatsapp_message_id', 'created_at', name='uq_messages__whatsapp_id'),
         CheckConstraint("from_phone ~ '^\\+[1-9]\\d{1,14}$'", name='chk_messages__from_e164'),
         CheckConstraint("to_phone ~ '^\\+[1-9]\\d{1,14}$'", name='chk_messages__to_e164'),
         CheckConstraint(
             "tenant_id = (SELECT tenant_id FROM whatsapp_channels c WHERE c.id = channel_id)",
             name='fk_messages__tenant_match'
+        ),
+        ForeignKeyConstraint(
+            ['channel_id', 'tenant_id'],
+            ['whatsapp_channels.id', 'whatsapp_channels.tenant_id'],
+            name='fk_messages__channel_tenant',
+            ondelete='RESTRICT',
         ),
         Index("ix_messages__tenant_channel_to_created","tenant_id", "channel_id", "to_phone", "created_at",postgresql_ops={"created_at": "DESC"}),
         # Index('ix_messages__tenant_channel_from_created', 'tenant_id', 'channel_id', 'from_phone', 'created_at', postgresql_desc=True),
