@@ -1,16 +1,23 @@
 from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
-from pydantic import BaseModel, Field, ConfigDict
+from src.shared.security import Role
 
-class Principal(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    user_id: UUID | None = None
+
+@dataclass(frozen=True)
+class TenantEntity:
+    id: UUID
+    name: str
+
+
+@dataclass(frozen=True)
+class UserEntity:
+    id: UUID
     tenant_id: UUID
-    email: str | None = None
-    role: set[str] = Field(default_factory=set)
-
-
-    def has_any_role(self, *want: str) -> bool:
-        want_u = {r.upper() for r in want}
-        return any(r in self.role for r in want_u)
-     
+    email: str
+    role: Role
+    is_active: bool
+    is_verified: bool
+    last_login: datetime | None

@@ -1,50 +1,58 @@
 from __future__ import annotations
+
 from uuid import UUID
-from passlib.context import CryptContext
-from ..infrastructure.repositories import TenantRepository, UserRepository
-from .commands import CreateTenant, CreateUser, AssignRole, UpdateTenant, UpdateTenantStatus
-from .queries import GetTenant, GetUser
 
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+from sqlalchemy.ext.asyncio import AsyncSession
 
-# Tenants
-async def handle_create_tenant(cmd: CreateTenant, repo: TenantRepository):
-    return await repo.create(
-        name=cmd.name,
-        tenant_type=cmd.tenant_type,
-        subscription_plan=cmd.subscription_plan,
-        billing_email=cmd.billing_email,
-    )
+from src.identity.application.commands import BootstrapPlatform, CreateUser
+from src.identity.domain.services import AuthenticationService
+from src.identity.domain.value_objects import Role
+from src.identity.infrastructure.Repositories import TenantRepository, UserRepository
+from src.shared.database import set_rls_gucs
+from src.shared.security import get_password_hasher, get_token_provider
 
-async def handle_get_tenant(q: GetTenant, repo: TenantRepository):
-    return await repo.by_id(q.tenant_id)
 
-async def handle_update_tenant(cmd: UpdateTenant, repo: TenantRepository):
-    return await repo.update(
-        cmd.tenant_id,
-        name=cmd.name,
-        tenant_type=cmd.tenant_type,
-        subscription_plan=cmd.subscription_plan,
-        billing_email=cmd.billing_email,
-    )
+class IdentityHandlers:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.tenants = TenantRepository(session)
+        self.users = UserRepository(session)
+        # Wire abstractions
+        self.hasher = get_password_hasher()
+        self.tokens = get_token_provider()
+        self.auth = AuthenticationService(self.users, self.tenants, self.hasher, self.tokens)
 
-async def handle_update_tenant_status(cmd: UpdateTenantStatus, repo: TenantRepository):
-    return await repo.update_status(
-        cmd.tenant_id,
-        is_active=cmd.is_active,
-        subscription_status=cmd.subscription_status,
-    )
+    async def bootstrap(self, cmd: BootstrapPlatform) -> dict:
+        """Create platform owner tenant and SUPER_ADMIN user. Idempotent."""
+        tenant = await self.tenants.get_by_name(cmd.tenant_name)
+        if not tenant:
+            tenant = await self.tenants.create_platform_owner(cmd.tenant_name, cmd.billing_email)
 
-# Users
-async def handle_create_user(cmd: CreateUser, repo: UserRepository):
-    pw_hash = pwd_ctx.hash(cmd.password)
-    return await repo.create(cmd.tenant_id, email=cmd.email, password_hash=pw_hash, role=cmd.role)
+        # Set RLS to new tenant before touching users
+        await set_rls_gucs(self.session, str(tenant.id), None, "SUPER_ADMIN")
 
-async def handle_get_user(q: GetUser, repo: UserRepository):
-    return await repo.by_id(q.tenant_id, UUID(q.user_id))
+        owner = await self.users.ensure_user(
+            tenant_id=tenant.id,
+            email=str(cmd.owner_email),
+            password_hash=self.hasher.hash(cmd.owner_password),
+            role=Role.SUPER_ADMIN,
+        )
+        return {
+            "tenant_id": str(tenant.id),
+            "owner_user_id": str(owner.id),
+            "tenant_name": tenant.name,
+        }
 
-async def handle_assign_role(cmd: AssignRole, repo: UserRepository):
-    return await repo.assign_role(cmd.tenant_id, UUID(cmd.user_id), cmd.role)
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_ctx.verify(plain, hashed)
+    async def admin_create_user(self, *, tenant_id: UUID, cmd: CreateUser) -> dict:
+        user = await self.users.create_user(
+            tenant_id=tenant_id,
+            email=str(cmd.email),
+            password_hash=self.hasher.hash(cmd.password),
+            role=Role(cmd.role.value),
+        )
+        return {
+            "id": str(user.id),
+            "email": user.email,
+            "role": user.role.value,
+            "tenant_id": str(user.tenant_id),
+        }

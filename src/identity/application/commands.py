@@ -1,40 +1,17 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional
-from uuid import UUID
 
-# Tenants
-@dataclass
-class CreateTenant:
-    name: str
-    tenant_type: str = "CLIENT"
-    subscription_plan: str = "BASIC"
-    billing_email: Optional[str] = None
+from pydantic import BaseModel, EmailStr, Field
+from src.shared.security import Role
 
-@dataclass
-class UpdateTenant:
-    tenant_id: UUID
-    name: Optional[str] = None
-    tenant_type: Optional[str] = None
-    subscription_plan: Optional[str] = None
-    billing_email: Optional[str] = None
 
-@dataclass
-class UpdateTenantStatus:
-    tenant_id: UUID
-    is_active: Optional[bool] = None
-    subscription_status: Optional[str] = None
+class BootstrapPlatform(BaseModel):
+    tenant_name: str = Field(min_length=1, max_length=255)
+    owner_email: EmailStr
+    owner_password: str = Field(min_length=8, max_length=128)
+    billing_email: EmailStr | None = None
 
-# Users
-@dataclass
-class CreateUser:
-    tenant_id: UUID
-    email: str
-    password: str
-    role: str = "STAFF"
 
-@dataclass
-class AssignRole:
-    tenant_id: UUID
-    user_id: str
-    role: str
+class CreateUser(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
+    role: Role

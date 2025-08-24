@@ -1,92 +1,37 @@
-# src/main.py
 from __future__ import annotations
 
-import os
-
-# if os.getenv("DEBUG_ATTACH") == "1":
-#     import debugpy
-#     debugpy.listen(("127.0.0.1", 8000))
-#     print("🔎 debugpy listening on 127.0.0.1:8000 (waiting for VS Code attach)...")
-#     if os.getenv("DEBUG_WAIT", "1") == "1":
-#         debugpy.wait_for_client()
-# ... rest of your imports and FastAPI app setup below ...
-
 import logging
-import uuid
-from typing import Any, Dict
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
+from starlette.middleware.cors import CORSMiddleware
 
-from src.shared.model_loader import import_all_models
-from src.shared.exceptions import add_exception_handlers
-# Optional: if you want structured request logs, uncomment the next line and the add_middleware call.
-# from src.shared.middleware import LoggingMiddleware
+from src.identity.api.routes import auth_router, admin_router
+from src.shared.exceptions import app_error_handler, AppError, unhandled_error_handler
+from src.shared.middleware import RequestContextMiddleware
 
-logger = logging.getLogger("uvicorn.error")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("app")
 
+app = FastAPI(title="WhatsApp Chatbot Platform API", version="1.0.0")
 
-def create_app() -> FastAPI:
-    """
-    Application factory. Registers ORM mappers before any router imports
-    to avoid partially-initialized-module errors from circular imports.
-    """
-    # 1) Ensure all model modules are imported once (side-effect registration)
-    import_all_models()
+# Middlewares
+app.add_middleware(RequestContextMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # adjust for prod
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    # 2) Build app
-    app = FastAPI(
-        title="WhatsApp Chatbot Platform",
-        description="Enterprise SaaS platform for multi-tenant chatbot management",
-        version="1.0.0",
-    )
+# Routers
+app.include_router(admin_router)
+app.include_router(auth_router)
 
-    # 3) Middleware & exception handlers
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],   # tighten in production
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-    # app.add_middleware(LoggingMiddleware)  # optional, if available
-    add_exception_handlers(app)
+# Error handlers
+app.add_exception_handler(AppError, app_error_handler)
+app.add_exception_handler(Exception, unhandled_error_handler)
 
-    # 4) Import and include routers AFTER models are registered
-    from src.platform.api.routes import router as platform_config_router
-    from src.identity.api.routes import router as identity_router
-    from src.messaging.api.routes import router as messaging_routes
-    from src.messaging.api.webhooks import router as messaging_webhooks
-    from src.conversation.api.routes import router as conversation_router
-
-    app.include_router(platform_config_router)
-    app.include_router(identity_router)
-    app.include_router(messaging_webhooks)  # public (signature verified)
-    app.include_router(messaging_routes)    # protected (Bearer)
-    app.include_router(conversation_router)
-
-    # 5) Meta endpoints
-    @app.get("/", tags=["meta"])
-    def root() -> Dict[str, Any]:
-        return {"status": "ok", "name": "WhatsApp Chatbot Platform", "version": "1.0.0"}
-
-    return app
-
-
-# Uvicorn entrypoint
-app = create_app()
-
-
-# Request-ID + top-level error guard
-@app.middleware("http")
-async def add_request_id_and_logging(request: Request, call_next):
-    rid = request.headers.get("X-Request-Id", str(uuid.uuid4()))
-    request.state.request_id = rid
-    try:
-        response = await call_next(request)
-    except Exception:
-        logger.exception("unhandled_error", extra={"request_id": rid})
-        return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
-    response.headers["X-Request-Id"] = rid
-    return response
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}

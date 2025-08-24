@@ -1,211 +1,125 @@
 from __future__ import annotations
-
-from collections.abc import Iterable
-from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional
-from uuid import UUID
-
-import debugpy
-from fastapi import Depends, Header, HTTPException, status, Security
-from jose import jwt, JWTError
-from jose.exceptions import ExpiredSignatureError
-
-from src.config import settings
+from abc import ABC, abstractmethod
+import logging
+from typing import Any
+import datetime as dt
+import jwt  # PyJWT
+from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from src.identity.domain.entities import Principal
-from src.identity.domain.value_objects import UserRole
-from src.shared.utils import _to_uuid_or_none
-# -----------------------------------------------------------------------------
-# Public types
-# -----------------------------------------------------------------------------
+from passlib.hash import argon2, bcrypt
+from sqlalchemy import UUID
 
-bearer_scheme = HTTPBearer(auto_error=False)
-#bearer_scheme = HTTPBearer(auto_error=False)
+from src.identity.domain.value_objects import Role
+from src.config import get_settings
+from src.shared.exceptions import InvalidCredentialsError, UnauthorizedError, ForbiddenError
 
-# -----------------------------------------------------------------------------
-# JWT helpers
-# -----------------------------------------------------------------------------
-def create_access_token(
-    *,
-    subject: str,
-    tenant_id: UUID,
-    role: List[str],
-    expires_minutes: Optional[int] = None,
-) -> str:
-    """
-    Build a signed JWT with the platform's required claims.
-    """
-    exp_min = expires_minutes if expires_minutes is not None else getattr(settings, "JWT_EXPIRE_MIN", 60)
-    now = datetime.now(tz=timezone.utc)
-    payload = {
-        "sub": subject,
-        "tenant_id": tenant_id,
-        "roles": role,
-        "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(minutes=exp_min)).timestamp()),
-    }
-    secret = getattr(settings.JWT_SECRET, "get_secret_value", lambda: settings.JWT_SECRET)()
-    if hasattr(secret, "get_secret_value"):
-        secret = secret.get_secret_value()
-    secret = str(secret)
-    return jwt.encode(payload, secret, algorithm=settings.JWT_ALG)
+logger = logging.getLogger("app.security")
 
-def _secret_alg() -> tuple[str, str]:
-    raw = settings.JWT_SECRET
-    secret = raw.get_secret_value() if hasattr(raw, "get_secret_value") else (raw if isinstance(raw, str) else "")
-    if not secret:
-        raise HTTPException(status_code=500, detail="JWT secret not configured")
-    alg = getattr(settings, "JWT_ALG", "HS256")
-    return secret, alg
+# ==========================================================
+# Abstraction: PasswordHasher
+# ==========================================================
+class PasswordHasher(ABC):
+    @abstractmethod
+    def hash(self, password: str) -> str: ...
 
-def decode_token(token: str) -> dict:
-    """
-    Verify and decode a JWT. Raises FastAPI HTTP 401 on failure.
-    """
-    try:
-        secret = getattr(settings.JWT_SECRET, "get_secret_value", lambda: settings.JWT_SECRET)()
-        if hasattr(secret, "get_secret_value"):
-            secret = secret.get_secret_value()
-        secret = str(secret)
-        return jwt.decode(token, secret, algorithms=[settings.JWT_ALG])
-    except ExpiredSignatureError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
-    except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    @abstractmethod
+    def verify(self, password: str, hashed: str) -> bool: ...
 
-def _pick(d: dict[str, Any], *keys: str, default=None):
-    for k in keys:
-        if k in d and d[k] is not None:
-            return d[k]
-    return default
 
-def _as_roles(v: Any) -> set[str]:
-    if v is None:
-        return set()
-    out: set[str] = set()
-    if isinstance(v, str):
-        out = {s.strip().upper() for s in v.replace(",", " ").split() if s.strip()}
-    elif isinstance(v, dict):
-        out = {k.upper() for k, ok in v.items() if ok}
-    elif isinstance(v, Iterable):
-        out = {str(x).upper() for x in v if isinstance(x, str)}
-    if UserRole:
-        out = {r for r in out if r in UserRole.__members__}
-    return out
+class Argon2PasswordHasher(PasswordHasher):
+    def hash(self, password: str) -> str:
+        return argon2.using(rounds=4).hash(password)  # Argon2id
 
-def _get_secret_and_alg() -> tuple[str, str]:
-    raw = settings.JWT_SECRET
-    secret = raw.get_secret_value() if hasattr(raw, "get_secret_value") else str(raw or "")
-    if not secret:
-        raise HTTPException(status_code=500, detail="JWT secret not configured")
-    return secret, getattr(settings, "JWT_ALG", "HS256")
-# -----------------------------------------------------------------------------
-# FastAPI dependencies
-# -----------------------------------------------------------------------------
-async def get_principal(credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme)) -> Principal | None:
-    if credentials is None or (credentials.scheme or "").lower() != "bearer":
+    def verify(self, password: str, hashed: str) -> bool:
+        try:
+            return argon2.verify(password, hashed)
+        except Exception:
+            return False
+
+
+class BcryptPasswordHasher(PasswordHasher):
+    def hash(self, password: str) -> str:
+        return bcrypt.using(rounds=12).hash(password)
+
+    def verify(self, password: str, hashed: str) -> bool:
+        try:
+            return bcrypt.verify(password, hashed)
+        except Exception:
+            return False
+
+
+def get_password_hasher() -> PasswordHasher:
+    """Factory driven by settings.PASSWORD_HASH_SCHEME."""
+    scheme = get_settings().PASSWORD_HASH_SCHEME.lower()
+    if scheme == "argon2":
+        return Argon2PasswordHasher()
+    return BcryptPasswordHasher()
+
+
+# ==========================================================
+# Abstraction: TokenProvider
+# ==========================================================
+class TokenProvider(ABC):
+    @abstractmethod
+    def encode(self, *, sub: UUID, tenant_id: UUID, role: Role) -> str: ...
+
+    @abstractmethod
+    def decode(self, token: str) -> dict[str, Any]: ...
+
+
+class JWTTokenProvider(TokenProvider):
+    def __init__(self):
+        self.settings = get_settings()
+
+    def encode(self, *, sub: UUID, tenant_id: UUID, role: Role) -> str:
+        now = dt.datetime.utcnow()
+        exp = now + dt.timedelta(minutes=self.settings.JWT_EXPIRES_MIN)
+        payload = {
+            "sub": str(sub),
+            "tenant_id": str(tenant_id),
+            "role": role.value,
+            "iat": int(now.timestamp()),
+            "exp": int(exp.timestamp()),
+        }
+        return jwt.encode(payload, self.settings.JWT_SECRET, algorithm=self.settings.JWT_ALG)
+
+    def decode(self, token: str) -> dict[str, Any]:
+        try:
+            return jwt.decode(token, self.settings.JWT_SECRET, algorithms=[self.settings.JWT_ALG])
+        except jwt.ExpiredSignatureError as e:
+            raise UnauthorizedError("Token expired") from e
+        except jwt.InvalidTokenError as e:
+            raise UnauthorizedError("Invalid token") from e
+
+
+def get_token_provider() -> TokenProvider:
+    return JWTTokenProvider()
+
+
+# ==========================================================
+# FastAPI Dependencies
+# ==========================================================
+_bearer = HTTPBearer(auto_error=False)
+
+
+async def auth_credentials(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> dict | None:
+    if not creds:
         return None
-    
-    token = (credentials.credentials or "").strip()
-    secret, alg = _get_secret_and_alg()
-    try:
-        claims = jwt.decode(token, secret, algorithms=[alg])
-        # 👇 Add debug print here
-        print("JWT roles raw:", claims.get("roles"))
-    except ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    
-    # user_id may be a UUID (preferred) or an email/username.
-    user_raw = _pick(claims, "user_id", "uid", "userId", "u_id")
-    user_id = _to_uuid_or_none(user_raw)
+    provider = get_token_provider()
+    return provider.decode(creds.credentials)
 
-    # tenant is required and must be a UUID
-    tenant  = _pick(claims, "tenant_id", "tenantId", "tid")
-    try:
-        tenant_uuid = UUID(str(tenant))
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or missing tenant claim")
-    
-    # email from dedicated claims or fall back to 'sub' only for email
-    email   = _pick(claims, "email", "preferred_username")
-    if not email:
-        sub = _pick(claims, "sub")
-        email = sub if sub and "@" in str(sub) else None
-    
-    roles = _as_roles(_pick(claims, "roles", "role", "permissions", "scopes"))
 
-    return Principal(
-        user_id=user_id,
-        tenant_id=tenant_uuid,
-        email=email,
-        role=roles,
-    )
+def require_auth(jwt_claims: dict | None = Depends(auth_credentials)) -> dict:
+    if not jwt_claims:
+        raise UnauthorizedError("Missing or invalid Authorization header")
+    return jwt_claims
 
-# def require_roles_notinuse(*required: str):
-#     req = {r.upper() for r in required}
-#     async def _dep(
-#         principal: Principal | None = Depends(get_principal),
-#         session: AsyncSession = Depends(get_session),
-#     ) -> Principal:
-#         if principal is None:
-#             raise HTTPException(status_code=401, detail="Authentication required")
-#         if not principal.roles or principal.roles.isdisjoint(req):
-#             raise HTTPException(status_code=403, detail="Insufficient role")
-#         # Try to set RLS tenant for this transaction; ignore if DB doesn’t support the GUC
-#         if principal.tenant_id:
-#             try:
-#                 await session.execute(text("SELECT set_config('app.jwt_tenant', :tid, true)"), {"tid": str(principal.tenant_id)},
-# )
 
-#             except Exception:
-#                 pass
-#         return principal
-#     return _dep
+def require_roles(*allowed: Role):
+    async def _dep(jwt_claims: dict = Depends(require_auth)) -> dict:
+        role = jwt_claims.get("role")
+        if role not in [r.value for r in allowed]:
+            raise ForbiddenError("Insufficient role")
+        return jwt_claims
 
-def require_roles(*required: str):
-    """
-    FastAPI dependency to enforce RBAC. This does NOT touch the DB.
-    Tenant GUC (app.jwt_tenant) is set by src.shared.database.get_session().
-    """
-    debugpy.breakpoint()
-    req = {r.upper() for r in required}
-    async def _dep(principal: Principal | None = Depends(get_principal)) -> Principal:
-        if principal is None:
-            raise HTTPException(status_code=401, detail="Authentication required")
-        if not principal.role or principal.role.isdisjoint(req):
-            raise HTTPException(status_code=403, detail="Insufficient role")
-        return principal
     return _dep
-# -----------------------------------------------------------------------------
-# Webhook signature verification (used by messaging webhooks)
-# -----------------------------------------------------------------------------
-def verify_hub_signature(raw_body: bytes, app_secret: str | bytes, provided_signature: Optional[str]) -> bool:
-    """
-    Validate X-Hub-Signature-256 header using HMAC-SHA256.
-    Returns True if valid; False otherwise.
-    """
-    if not provided_signature or not provided_signature.startswith("sha256="):
-        return False
-
-    import hmac, hashlib
-
-    if isinstance(app_secret, str):
-        key = app_secret.encode("utf-8")
-    else:
-        key = app_secret
-
-    expected = hmac.new(key, raw_body, hashlib.sha256).hexdigest()
-    # Header may be either "sha256=HEX" or just HEX; handle both robustly
-    provided_hex = provided_signature.split("=", 1)[1] if "=" in provided_signature else provided_signature
-    try:
-        return hmac.compare_digest(provided_hex, expected)
-    except Exception:
-        return False
-
-async def get_tenant_from_header(x_tenant_id: Optional[str] = Header(None)) -> Optional[str]:
-    """Bootstrap-only: allow tenant via header (id/code acceptable upstream)."""
-    if not x_tenant_id:
-        return None
-    return x_tenant_id

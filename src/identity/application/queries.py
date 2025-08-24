@@ -1,12 +1,14 @@
 from __future__ import annotations
-from dataclasses import dataclass
+
 from uuid import UUID
+from pydantic import BaseModel, EmailStr
+from src.shared.security import Role
 
-@dataclass
-class GetTenant:
-    tenant_id: UUID
 
-@dataclass
-class GetUser:
+class MeDTO(BaseModel):
+    id: UUID
     tenant_id: UUID
-    user_id: str
+    email: EmailStr
+    role: Role
+    is_active: bool
+    is_verified: bool

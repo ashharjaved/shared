@@ -1,74 +1,47 @@
 from __future__ import annotations
-import time, uuid, logging
+
+import logging
+import uuid
 from typing import Callable
+
+from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import Response
-from jose import jwt
-from src.config import settings
-logger = logging.getLogger(__name__)
 
-class LoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        request_id = str(uuid.uuid4())
-        start = time.time()
+from src.shared.database import tenant_ctx, user_ctx, roles_ctx
+from src.shared.security import decode_jwt
 
-        tenant_id = request.headers.get("X-Tenant-Id")
-        user_id = None
-
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            try:
-                import jwt
-                from src.config import settings
-                token = auth_header.split(" ", 1)[1]
-                payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALG])
-                tenant_id = payload.get("tenant_id", tenant_id)
-                user_id = payload.get("sub")
-            except Exception:
-                pass  # ignore bad tokens for logging
-
-        logger.info(
-            "Request started",
-            extra={"request_id": request_id, "method": request.method, "url": str(request.url),
-                   "tenant_id": tenant_id, "user_id": user_id,
-                   "user_agent": request.headers.get("User-Agent"),
-                   "client_ip": request.client.host if request.client else None},
-        )
-
-        request.state.request_id = request_id
-        request.state.tenant_id = tenant_id
-        request.state.user_id = user_id
-
-        try:
-            response = await call_next(request)
-            duration = time.time() - start
-            logger.info("Request completed", extra={"request_id": request_id, "status_code": response.status_code,
-                                                   "duration_ms": round(duration * 1000, 2),
-                                                   "tenant_id": tenant_id, "user_id": user_id})
-            response.headers["X-Request-ID"] = request_id
-            return response
-        except Exception as e:
-            duration = time.time() - start
-            logger.error("Request failed", extra={"request_id": request_id, "error": str(e),
-                                                  "duration_ms": round(duration * 1000, 2),
-                                                  "tenant_id": tenant_id, "user_id": user_id}, exc_info=True)
-            raise
+logger = logging.getLogger("app")
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        request.state.request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-        # principal = get_principal(request.headers.get("Authorization", "")) or {}
-        #request.state.tenant_id = principal.__getattribute__("tenant_id")
-        auth = request.headers.get("Authorization")
-        try:
-            if auth and auth.startswith("Bearer "):
-                payload = jwt.decode(auth.split(" ",1)[1], settings.JWT_SECRET, algorithms=[settings.JWT_ALG])
-                request.state.tenant_id = payload.get("tenant_id")
-        except Exception:
-            request.state.tenant_id = None
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Request ID for logs
+        req_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        # Attempt to parse JWT (if present) to prefill context
+        tenant_id = None
+        user_id = None
+        role_val = None
 
-        resp: Response = await call_next(request)
-        resp.headers["X-Request-ID"] = request.state.request_id
-        return resp
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth.split(" ", 1)[1]
+            try:
+                claims = decode_jwt(token)
+                tenant_id = claims.get("tenant_id")
+                user_id = claims.get("sub")
+                role_val = claims.get("role")
+            except Exception:
+                # Leave unauthenticated; route guards will raise
+                pass
+
+        token_t = tenant_ctx.set(tenant_id)
+        token_u = user_ctx.set(user_id)
+        token_r = roles_ctx.set(role_val)
+
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = req_id
+
+        tenant_ctx.reset(token_t)
+        user_ctx.reset(token_u)
+        roles_ctx.reset(token_r)
+        return response
