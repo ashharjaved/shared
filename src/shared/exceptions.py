@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -70,7 +71,7 @@ class InternalServerError(AppError):
     code = "internal_error"
 
 
-async def app_error_handler(_: Request, exc: AppError):
+async def app_error_handler_old(_: Request, exc: AppError):
     return exc.to_response()
 
 
@@ -80,3 +81,28 @@ async def unhandled_error_handler(_: Request, exc: Exception):
         status_code=HTTP_500_INTERNAL_SERVER_ERROR,
         content={"code": "internal_error", "message": "Internal server error", "details": {}},
     )
+
+async def app_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """
+    FastAPI-compatible exception handler.
+    Accepts Exception (for typing), handles AppError explicitly, otherwise re-raises.
+    """
+    if isinstance(exc, AppError):
+        status_code = getattr(exc, "status_code", 500)
+        err_code = getattr(exc, "code", "unknown_error")
+        message = getattr(exc, "message", str(exc))
+        details: Any = getattr(exc, "details", None)
+        request_id = request.headers.get("x-request-id")
+
+        body = {
+            "error": {
+                "code": err_code,
+                "message": message,
+                "details": details,
+                "request_id": request_id,
+            }
+        }
+        return JSONResponse(status_code=status_code, content=body)
+
+    # Not an AppError -> let default handler/logging take over
+    raise exc

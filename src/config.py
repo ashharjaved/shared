@@ -1,23 +1,56 @@
+# src/config.py
+from __future__ import annotations
+
 from functools import lru_cache
-from pydantic_settings import BaseSettings  # if using Pydantic v2
-# or: from pydantic import BaseSettings  # if still on v1
+from typing import Optional
+
+from pydantic import Field
+from pydantic_settings import BaseSettings
+
 
 class Settings(BaseSettings):
-    DATABASE_URL: str
-    JWT_SECRET: str
-    BOOTSTRAP_TOKEN: str
-    REDIS_URL:str
+    # --- Database ---
+    DATABASE_URL: str = Field(..., description="PostgreSQL async URL, e.g. postgresql+asyncpg://user:pass@host/db")
 
-    JWT_ALG: str = "HS256"
-    JWT_EXPIRES_MIN: int = 60
-    PASSWORD_HASH_SCHEME: str = "argon2"
-    LOCKOUT_MAX_FAILED: int = 5
-    LOCKOUT_COOLDOWN_MIN: int = 15
+    # --- JWT / Auth ---
+    JWT_SECRET: str = Field(..., description="JWT HMAC/RS secret (HS256 by default)")
+    JWT_ALG: str = Field("HS256", description="JWT algorithm")
+    JWT_EXPIRE_MINUTES: int = Field(60, description="Access token lifetime in minutes")
+
+    # --- Password hashing policy (read by security.get_password_hasher) ---
+    PASSWORD_HASH_SCHEME: str = Field("argon2", description="argon2 | bcrypt")
+
+    # --- App / Runtime ---
+    ENV: str = Field("dev", description="Environment name")
+    LOG_LEVEL: str = Field("INFO", description="Logging level")
+
+    # --- Redis (optional) ---
+    REDIS_URL: Optional[str] = Field(None, description="Redis URL, e.g. redis://localhost:6379/0")
+
+    # --- Bootstrap (optional) ---
+    # Used by initial platform-owner/tenant bootstrap logic if present.
+    BOOTSTRAP_TOKEN: Optional[str] = Field(
+        None,
+        description="One-time bootstrap token for initial setup (optional)."
+    )
+
+        # --- Account Lockout Policy ---
+    LOCKOUT_MAX_FAILED: int = Field(5, description="Max consecutive failed logins before lockout")
+    LOCKOUT_COOLDOWN_MIN: int = Field(15, description="Lockout cooldown duration in minutes")
 
     class Config:
         env_file = ".env"
-        case_sensitive = True
+        extra = "ignore"
 
-@lru_cache
+
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return get_settings()   # no arguments, values pulled from env/.env
+    """
+    Singleton accessor for Settings.
+    Using lru_cache prevents repeated env parsing and avoids recursion mistakes.
+    """
+    # Pylance thinks BaseSettings requires args; at runtime env is used.
+    return Settings()  # type: ignore[call-arg]
+
+
+__all__ = ["Settings", "get_settings"]

@@ -28,7 +28,7 @@ Base = declarative_base()
 class Tenant(Base):
     __tablename__ = "tenants"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True,server_default=text("gen_random_uuid()"))
     name = Column(String(255), nullable=False, unique=True)
     tenant_type = Column(SAEnum(TenantType, name="tenant_type_enum"), nullable=False)
     parent_tenant_id = Column(PGUUID(as_uuid=True), nullable=True)
@@ -57,11 +57,11 @@ class User(Base):
     # password_hash = Column(String, nullable=False)
     
     
-    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID, ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False)
     role = Column(SAEnum(Role, name="user_role_enum"), nullable=False, default=Role.STAFF)
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False, index=True)
-    hashed_password: Mapped[str] = mapped_column(String, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     failed_login_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_login = Column(DateTime, nullable=True)

@@ -78,7 +78,7 @@ async def admin_create_user(
     jwt_claims=Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
-    await set_rls_gucs(db, jwt_claims["tenant_id"], jwt_claims["sub"], jwt_claims["role"])
+    await set_rls_gucs(db, tenant_id=jwt_claims["tenant_id"], user_id=jwt_claims["sub"], role=jwt_claims["role"])
     handlers = IdentityHandlers(db)
     result = await handlers.admin_create_user(tenant_id=UUID(jwt_claims["tenant_id"]), cmd=CreateUser(**payload.model_dump()))
     return AdminCreateUserResponse(**result)
@@ -101,7 +101,7 @@ async def login(
     tenants = TenantRepository(db)
     tenant = await tenants.get_by_name(payload.tenant_name)
     if tenant:
-        await set_rls_gucs(db, str(tenant.id), None, None)
+        await set_rls_gucs(db, tenant_id=str(tenant.id), user_id=None, role=None)
 
     # Wire abstractions for the service
     hasher = get_password_hasher()
@@ -121,7 +121,7 @@ async def login(
     },
 )
 async def me(jwt_claims=Depends(require_auth), db: AsyncSession = Depends(get_db)):
-    await set_rls_gucs(db, jwt_claims["tenant_id"], jwt_claims["sub"], jwt_claims["role"])
+    await set_rls_gucs(db, tenant_id = jwt_claims["tenant_id"], user_id=jwt_claims["sub"], role=jwt_claims["role"])
     user = await UserRepository(db).get_by_id(UUID(jwt_claims["sub"]))
     if not user:
         raise UnauthorizedError("User not found")
@@ -145,7 +145,7 @@ async def me(jwt_claims=Depends(require_auth), db: AsyncSession = Depends(get_db
     },
 )
 async def change_password(payload: ChangePasswordRequest, jwt_claims=Depends(require_auth), db: AsyncSession = Depends(get_db)):
-    await set_rls_gucs(db, jwt_claims["tenant_id"], jwt_claims["sub"], jwt_claims["role"])
+    await set_rls_gucs(db, tenant_id=jwt_claims["tenant_id"], user_id=jwt_claims["sub"], role=jwt_claims["role"])
     repo = UserRepository(db)
     user = await repo.get_by_id(UUID(jwt_claims["sub"]))
     if not user:

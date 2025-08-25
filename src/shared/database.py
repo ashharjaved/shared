@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextvars import ContextVar
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -23,23 +23,44 @@ user_ctx: ContextVar[str | None] = ContextVar("user_ctx", default=None)
 roles_ctx: ContextVar[str | None] = ContextVar("roles_ctx", default=None)
 
 
-async def set_rls_gucs(session: AsyncSession, tenant_id: str | None, user_id: str | None, roles: str | None) -> None:
-    # SET LOCAL requires a transaction scope; caller must be inside session.begin()
-    if tenant_id:
-        await session.execute(text("SET LOCAL app.jwt_tenant = :t"), {"t": tenant_id})
+async def set_rls_gucs(session, *, tenant_id: str, user_id: Optional[str] = None, role: Optional[str] = None) -> None:
+    """
+    Set per-request RLS context. Uses set_config(..., true) to scope values to the current transaction.
+    Must be called *before* any tenant-scoped query.
+    """
+    # tenant (REQUIRED)
+    await session.execute(
+        text("SELECT set_config('app.jwt_tenant', :tenant_id, true)"),
+        {"tenant_id": tenant_id},
+    )
+    # user (OPTIONAL)
     if user_id:
-        await session.execute(text("SET LOCAL app.user_id = :u"), {"u": user_id})
-    if roles:
-        await session.execute(text("SET LOCAL app.roles = :r"), {"r": roles})
+        await session.execute(
+            text("SELECT set_config('app.jwt_user', :user_id, true)"),
+            {"user_id": user_id},
+        )
+    # role (OPTIONAL)
+    if role:
+        await session.execute(
+            text("SELECT set_config('app.jwt_role', :role, true)"),
+            {"role": role},
+        )
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
+    """
+    Yields a transaction-scoped AsyncSession and sets the RLS GUCs
+    from the per-request ContextVars (tenant_ctx, user_ctx, roles_ctx).
+    Must be used by all routes that touch the DB.
+    """
     async with SessionLocal() as session:
+        # open a transaction so set_config(..., true) is scoped correctly
         async with session.begin():
             await set_rls_gucs(
                 session,
-                tenant_ctx.get(),
-                user_ctx.get(),
-                roles_ctx.get(),
+                tenant_id=tenant_ctx.get() or "",   # pass empty if not set; safe for platform-scoped tables
+                user_id=user_ctx.get() or None,
+                role=roles_ctx.get() or None,
             )
-            yield session  # commits on context exit
+        # after GUCs are set, yield the session for repositories
+        yield session

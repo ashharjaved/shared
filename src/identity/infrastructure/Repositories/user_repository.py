@@ -48,7 +48,7 @@ class UserRepository:
         res = await self.session.execute(stmt)
         return res.scalar_one_or_none()
 
-    async def create_user(self, *, tenant_id: UUID, email: str, password_hash: str, role: UserRole) -> User:
+    async def create_user(self, *, tenant_id: UUID, email: str, password_hash: str, role: Role) -> User:
         await assert_rls_set(self.session)
         user = User(tenant_id=tenant_id, email=email, password_hash=password_hash, role=role)
         self.session.add(user)
@@ -72,12 +72,20 @@ class UserRepository:
             update(User).where(User.id == user_id).values(password_hash=new_hash, password_changed_at=func.now())
         )
 
-    async def ensure_user(self, *, tenant_id: UUID, email: str, password_hash: str, role: UserRole) -> User:
+    async def ensure_user(self, *, tenant_id: UUID, email: str, password_hash: str, role: Role) -> User:
         await assert_rls_set(self.session)
         existing = await self.get_by_email(email=email)
-        if existing:
-            if existing.role != role:
-                existing.role = role
+        if existing is not None:
+            # Normalize to string; ORM column is a DB enum mapped as text
+            new_role = getattr(role, "value", str(role))
+            curr_role = getattr(existing, "role", None)
+            if curr_role != new_role:
+                setattr(existing, "role", new_role)  # avoid Column[str] assignment typing error
                 await self.session.flush()
             return existing
-        return await self.create_user(tenant_id=tenant_id, email=email, password_hash=password_hash, role=role)
+        return await self.create_user(
+            tenant_id=tenant_id,
+            email=email,
+            password_hash=password_hash,
+            role=getattr(role, "value", role),
+        )

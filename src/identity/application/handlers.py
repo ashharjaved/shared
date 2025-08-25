@@ -29,7 +29,7 @@ class IdentityHandlers:
             tenant = await self.tenants.create_platform_owner(cmd.tenant_name, cmd.billing_email)
 
         # Set RLS to new tenant before touching users
-        await set_rls_gucs(self.session, str(tenant.id), None, "SUPER_ADMIN")
+        await set_rls_gucs(self.session, tenant_id= str(tenant.id),user_id= None, role="SUPER_ADMIN")
 
         owner = await self.users.ensure_user(
             tenant_id=tenant.id,
