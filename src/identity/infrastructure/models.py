@@ -36,8 +36,8 @@ class Tenant(Base):
     subscription_status = Column(SAEnum(SubscriptionStatus, name="subscription_status_enum"), nullable=False, default=SubscriptionStatus.ACTIVE)
     billing_email = Column(String, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, server_default=text("now()"))
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, server_default=text("now()"))
 
     users = relationship("User", back_populates="tenant")
     # Relationships
@@ -65,11 +65,11 @@ class User(Base):
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     failed_login_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_login = Column(DateTime, nullable=True)
-    password_changed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    password_changed_at = Column(DateTime, nullable=False, default=datetime.utcnow, server_default=text("now()"))
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
-    updated_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, server_default=text("now()"))
+    updated_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, server_default=text("now()"))
     deleted_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
 
     tenant = relationship("Tenant", back_populates="users")
