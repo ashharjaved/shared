@@ -40,9 +40,12 @@ async def _apply_rls_gucs(
     role: Optional[str],
 ) -> None:
     # Exact names per RLS_GUC_CONTRACT.md
-    await session.execute(text("SET LOCAL app.jwt_tenant = :tenant_id"), {"tenant_id": str(tenant_id)})
-    await session.execute(text("SET LOCAL app.user_id = :user_id"), {"user_id": str(user_id or NIL_UUID)})
-    await session.execute(text("SET LOCAL app.roles = :roles"), {"roles": str(role or "")})
+    # await session.execute(text("SET LOCAL app.jwt_tenant = :tenant_id"), {"tenant_id": str(tenant_id)})
+    # await session.execute(text("SET LOCAL app.user_id = :user_id"), {"user_id": str(user_id or NIL_UUID)})
+    # await session.execute(text("SET LOCAL app.roles = :roles"), {"roles": str(role or "")})
+    await session.execute(text("SELECT set_config('app.jwt_tenant', :v, true)"), {"v": str(tenant_id)})
+    await session.execute(text("SELECT set_config('app.user_id', :v, true)"), {"v": str(user_id or NIL_UUID)})
+    await session.execute(text("SELECT set_config('app.roles', :v, true)"), {"v": str(role or "")})
 
 
 async def assert_rls_set(session: AsyncSession) -> None:
@@ -127,8 +130,38 @@ class tenant_override:
         self.tenant_id = tenant_id
 
     async def __aenter__(self):
-        await self.session.execute(text("SET LOCAL app.jwt_tenant = :tenant_id"), {"tenant_id": str(self.tenant_id)})
+        #await self.session.execute(text("SET LOCAL app.jwt_tenant = :tenant_id"), {"tenant_id": str(self.tenant_id)})
+        await self.session.execute(
+            text("SELECT set_config('app.jwt_tenant', :v, true)"),
+            {"v": str(self.tenant_id)},
+        )
 
     async def __aexit__(self, exc_type, exc, tb):
         # SET LOCAL reverts automatically at transaction end
         return False
+
+
+# -----------------------------------------------------------------------------
+# Raw DB dependency (no RLS)
+#
+# Some flows such as initial bootstrap and login occur before a JWT is available.
+# Those flows still need a database session but cannot satisfy the strict JWT
+# requirements enforced by `get_db_session`. This helper yields an AsyncSession
+# without attempting to extract or decode an Authorization header or set any
+# tenant-specific RLS context. Callers are responsible for setting RLS GUCs via
+# `set_rls_gucs` before issuing tenant-scoped queries.
+#
+# Example usage::
+#
+#     async def login(..., db: AsyncSession = Depends(get_db)):
+#         tenant = await tenants.get_by_name(name)
+#         async with db.begin():
+#             await set_rls_gucs(db, tenant_id=str(tenant.id), user_id=None, roles=None)
+#             ...
+
+async def get_db(
+    sessionmaker: async_sessionmaker[AsyncSession] = Depends(get_sessionmaker),
+) -> AsyncGenerator[AsyncSession, None]:
+    async with sessionmaker() as session:
+        async with session.begin():
+            yield session

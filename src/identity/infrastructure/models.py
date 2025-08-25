@@ -60,7 +60,7 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID, ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False)
     role = Column(SAEnum(Role, name="user_role_enum"), nullable=False, default=Role.STAFF)
-    email: Mapped[str] = mapped_column(String, unique=True, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     failed_login_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -70,7 +70,7 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, server_default=text("now()"))
     updated_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False, server_default=text("now()"))
-    deleted_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
+    deleted_at: Mapped[DateTime] = mapped_column(DateTime, nullable=True)
 
     tenant = relationship("Tenant", back_populates="users")
     

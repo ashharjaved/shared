@@ -5,6 +5,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import get_settings
@@ -23,7 +24,8 @@ from src.identity.api.schemas import (
 )
 from src.identity.domain.services import AuthenticationService
 from src.identity.infrastructure.Repositories import TenantRepository, UserRepository
-from src.shared.database import get_db, set_rls_gucs
+from src.dependencies import get_db_session, get_db 
+from src.shared.database import set_rls_gucs
 from src.shared.exceptions import UnauthorizedError
 from src.shared.security import Role, require_auth, require_roles, get_password_hasher, get_token_provider
 
@@ -32,6 +34,33 @@ logger = logging.getLogger("app.api")
 auth_router = APIRouter(prefix="/api/v1/auth", tags=["Identity"])
 admin_router = APIRouter(prefix="/api/v1/admin", tags=["Identity"])
 
+# ----------------------------- DB HEALTH CHECK ------------------------------ #
+# Lives under /api/v1/admin to avoid adding a new router; no auth required.
+@admin_router.get(
+    "/health/db",
+    summary="Database connectivity health check",
+    responses={200: {"description": "DB reachable"}},
+)
+async def db_health(db: AsyncSession = Depends(get_db)):
+    """
+    Verifies database connectivity by executing simple, read-only statements.
+    Does NOT require JWT. Useful for probes and quick troubleshooting.
+    """
+    # Basic ping
+    one = (await db.execute(text("SELECT 1"))).scalar_one()
+
+    # A few extra diagnostics
+    server_version = (await db.execute(text("SHOW server_version"))).scalar_one()
+    current_db = (await db.execute(text("SELECT current_database()"))).scalar_one()
+    now_utc = (await db.execute(text("SELECT now() AT TIME ZONE 'UTC'"))).scalar_one()
+
+    return {
+        "status": "ok" if one == 1 else "bad",
+        "server_version": str(server_version),
+        "database": str(current_db),
+        "time_utc": str(now_utc),
+    }
+# --------------------------------------------------------------------------- #
 
 @admin_router.post(
     "/bootstrap",
@@ -47,6 +76,7 @@ admin_router = APIRouter(prefix="/api/v1/admin", tags=["Identity"])
     },
 )
 async def bootstrap_platform(
+    # Use raw DB dependency because bootstrap occurs before a JWT is available
     payload: BootstrapRequest,
     db: AsyncSession = Depends(get_db),
     bootstrap_token: Annotated[str | None, Header(alias="X-Bootstrap-Token")] = None,
@@ -58,7 +88,6 @@ async def bootstrap_platform(
     handlers = IdentityHandlers(db)
     result = await handlers.bootstrap(BootstrapPlatform(**payload.model_dump()))
     return BootstrapResponse(**result)
-
 
 @admin_router.post(
     "/users",
@@ -74,11 +103,12 @@ async def bootstrap_platform(
     dependencies=[Depends(require_roles(Role.SUPER_ADMIN, Role.RESELLER_ADMIN, Role.TENANT_ADMIN))],
 )
 async def admin_create_user(
+    # Use RLS-aware DB dependency because user creation requires an authenticated tenant context
     payload: AdminCreateUserRequest,
     jwt_claims=Depends(require_auth),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db_session),
 ):
-    await set_rls_gucs(db, tenant_id=jwt_claims["tenant_id"], user_id=jwt_claims["sub"], role=jwt_claims["role"])
+    # RLS is already applied by get_db_session; create the user via the handler
     handlers = IdentityHandlers(db)
     result = await handlers.admin_create_user(tenant_id=UUID(jwt_claims["tenant_id"]), cmd=CreateUser(**payload.model_dump()))
     return AdminCreateUserResponse(**result)
@@ -96,12 +126,15 @@ async def admin_create_user(
 )
 async def login(
     payload: LoginRequest,
+    # Use raw DB dependency because login occurs before a JWT is available
     db: AsyncSession = Depends(get_db),
 ):
     tenants = TenantRepository(db)
     tenant = await tenants.get_by_name(payload.tenant_name)
     if tenant:
-        await set_rls_gucs(db, tenant_id=str(tenant.id), user_id=None, role=None)
+        # Set RLS in a transaction so SET LOCAL persists for subsequent queries
+        async with db.begin():
+            await set_rls_gucs(db, tenant_id=str(tenant.id), user_id=None, roles=None)
 
     # Wire abstractions for the service
     hasher = get_password_hasher()
@@ -120,8 +153,9 @@ async def login(
         429: {"description": "Rate limit exceeded"},
     },
 )
-async def me(jwt_claims=Depends(require_auth), db: AsyncSession = Depends(get_db)):
-    await set_rls_gucs(db, tenant_id = jwt_claims["tenant_id"], user_id=jwt_claims["sub"], role=jwt_claims["role"])
+
+async def me(jwt_claims=Depends(require_auth), db: AsyncSession = Depends(get_db_session)):
+    await set_rls_gucs(db, tenant_id = jwt_claims["tenant_id"], user_id=jwt_claims["sub"], roles=jwt_claims["role"])
     user = await UserRepository(db).get_by_id(UUID(jwt_claims["sub"]))
     if not user:
         raise UnauthorizedError("User not found")
@@ -134,7 +168,6 @@ async def me(jwt_claims=Depends(require_auth), db: AsyncSession = Depends(get_db
         is_verified=user.is_verified,
     )
 
-
 @auth_router.post(
     "/password/change",
     response_model=SuccessResponse,
@@ -144,8 +177,9 @@ async def me(jwt_claims=Depends(require_auth), db: AsyncSession = Depends(get_db
         429: {"description": "Rate limit exceeded"},
     },
 )
-async def change_password(payload: ChangePasswordRequest, jwt_claims=Depends(require_auth), db: AsyncSession = Depends(get_db)):
-    await set_rls_gucs(db, tenant_id=jwt_claims["tenant_id"], user_id=jwt_claims["sub"], role=jwt_claims["role"])
+
+async def change_password(payload: ChangePasswordRequest, jwt_claims=Depends(require_auth), db: AsyncSession = Depends(get_db_session)):
+    await set_rls_gucs(db, tenant_id=jwt_claims["tenant_id"], user_id=jwt_claims["sub"], roles=jwt_claims["role"])
     repo = UserRepository(db)
     user = await repo.get_by_id(UUID(jwt_claims["sub"]))
     if not user:

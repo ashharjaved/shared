@@ -32,6 +32,13 @@ app.include_router(auth_router)
 app.add_exception_handler(AppError, app_error_handler)
 app.add_exception_handler(Exception, unhandled_error_handler)
 
-@app.get("/healthz")
-async def healthz():
-    return {"ok": True}
+
+# Root endpoint
+@app.get("/", tags=["Root"])
+async def root():
+    """Root endpoint."""
+    return {
+        "message": "WhatsApp Chatbot Platform API",
+        "docs": "/docs",
+        "health": "/health",
+    }
