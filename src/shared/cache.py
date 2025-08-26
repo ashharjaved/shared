@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import os
 import time
-from typing import Any, Protocol, Tuple, runtime_checkable
-
+from typing import Any, Optional, Protocol, Tuple, runtime_checkable
 from src.config import get_settings
 
-# Optional redis import; we wrap it behind a typed backend
+# Use redis.asyncio instead of aioredis
 try:
-    import redis.asyncio as aioredis  # type: ignore
-except Exception:  # pragma: no cover
+    from redis import asyncio as aioredis
+except ImportError:
     aioredis = None  # type: ignore
 
 
@@ -49,7 +49,7 @@ class _RedisCache:
     Thin wrapper to satisfy the CacheBackend Protocol and keep strong typing.
     """
     def __init__(self, url: str):
-        # aioredis.from_url returns a Redis[Any]; we don’t rely on generics here
+        # aioredis.from_url returns a Redis[Any]; we don't rely on generics here
         self._client = aioredis.from_url(url, decode_responses=True)  # type: ignore[union-attr]
 
     async def get(self, key: str) -> Any | None:
@@ -61,6 +61,33 @@ class _RedisCache:
 
     async def delete(self, key: str) -> None:
         await self._client.delete(key)
+
+
+# Global redis client instance
+_redis: Optional[aioredis.Redis] = None  # type: ignore
+
+async def get_redis() -> aioredis.Redis:  # type: ignore
+    """
+    Returns a singleton aioredis client.
+    Uses REDIS_URL env var or defaults to redis://localhost:6379/0.
+    """
+    global _redis
+    if _redis is None:
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        # decode_responses=True so we always get str from redis
+        _redis = aioredis.from_url(  # type: ignore
+            redis_url,
+            encoding="utf-8",
+            decode_responses=True,
+        )
+    return _redis  # type: ignore
+
+async def close_redis() -> None:
+    """Close redis connection if initialized."""
+    global _redis
+    if _redis is not None:
+        await _redis.close()  # type: ignore
+        _redis = None
 
 
 class Cache:

@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     LOCKOUT_MAX_FAILED: int = Field(5, description="Max consecutive failed logins before lockout")
     LOCKOUT_COOLDOWN_MIN: int = Field(15, description="Lockout cooldown duration in minutes")
 
+    # ----------------------------
+    # Stage-2: Core Platform Config
+    # ----------------------------
+    # Redis-backed config cache TTL (seconds)
+    CONFIG_CACHE_TTL: int = 300  # 5 minutes default
+    # Rate limiting defaults (per-tenant, per-endpoint)
+    RATE_LIMIT_REQUESTS: int = 1000
+    RATE_LIMIT_WINDOW: int = 60  # seconds
+
+
     class Config:
         env_file = ".env"
         extra = "ignore"

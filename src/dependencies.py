@@ -165,3 +165,102 @@ async def get_db(
     async with sessionmaker() as session:
         async with session.begin():
             yield session
+
+# ============================
+# Stage-2: Core Platform DI
+# ============================
+from typing import Callable, Awaitable
+from uuid import UUID
+from fastapi import Depends, Request, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.shared.cache import get_redis
+from src.shared.database import async_session_factory
+from src.config import get_settings
+from src.shared.security import decode_jwt  # assuming Stage-1 provides this
+
+from src.platform.infrastructure.cache import ConfigCache
+from src.platform.infrastructure.Repositories import config_repository
+from src.platform.domain.services import ConfigurationService
+
+
+# --- Common DI already present in Stage-1; re-export safe wrappers if needed ---
+
+
+settings = get_settings()
+
+def get_current_tenant(request: Request) -> UUID:
+    """
+    Resolve tenant_id from request context.
+    Expected: Stage-1 auth middleware sets request.state.tenant_id (from JWT).
+    """
+    tid = getattr(request.state, "tenant_id", None)
+    if tid is None:
+        # fallback to Authorization header if middleware not yet added here
+        authz = request.headers.get("Authorization", "")
+        if authz.lower().startswith("bearer "):
+            token = authz.split(" ", 1)[1].strip()
+            try:
+                payload = decode_jwt(token)
+                tid = UUID(payload.get("tenant_id"))
+                request.state.tenant_id = tid
+            except Exception:
+                pass
+    if tid is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "unauthorized", "message": "Missing tenant context"},
+        )
+    return tid
+
+
+# --- ConfigurationService DI ---
+
+async def provide_configuration_service(
+    redis = Depends(get_redis),
+    settings = Depends(get_settings),
+) -> ConfigurationService:
+    cache = ConfigCache(redis_client=redis, ttl_seconds=settings.CONFIG_CACHE_TTL)
+    repo = config_repository.ConfigRepository()
+    return ConfigurationService(repo=repo, cache=cache)
+
+
+# --- Rate Limiter (per-tenant, per-endpoint; sliding window via ZSET) ---
+
+def rate_limit_dependency(endpoint_key: str) -> Callable[..., Awaitable[None]]:
+    """
+    Usage: Depends(rate_limit_dependency("GET:/platform/config"))
+    Sliding window using Redis ZSET with timestamps (ms).
+    Key: "ratelimit:{tenant_id}:{endpoint_key}"
+    """
+    async def _dep(
+        request: Request,
+        tenant_id: UUID = Depends(get_current_tenant),
+        redis = Depends(get_redis),
+        settings = Depends(get_settings),
+    ) -> None:
+        import time
+        now_ms = int(time.time() * 1000)
+        window_ms = settings.RATE_LIMIT_WINDOW * 1000
+        key = f"ratelimit:{tenant_id}:{endpoint_key}"
+
+        # Remove entries outside the window
+        await redis.zremrangebyscore(key, 0, now_ms - window_ms)
+        # Add current hit
+        await redis.zadd(key, {str(now_ms): now_ms})
+        # Get count
+        count = await redis.zcard(key)
+        # Set TTL a bit beyond window
+        await redis.pexpire(key, window_ms + 1000)
+
+        if count > settings.RATE_LIMIT_REQUESTS:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={"code": "rate_limited", "message": "Rate limit exceeded", "details": {
+                    "limit": settings.RATE_LIMIT_REQUESTS,
+                    "window_seconds": settings.RATE_LIMIT_WINDOW,
+                }},
+            )
+        return None
+
+    return _dep

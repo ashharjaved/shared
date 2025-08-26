@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import logging
-from typing import Annotated, AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, Request, status

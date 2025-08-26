@@ -6,7 +6,12 @@ from datetime import datetime
 from typing import Literal, Optional
 from uuid import UUID
 
+from fastapi import FastAPI
+from src.shared.cache import close_redis
+
 logger = logging.getLogger("app.audit")
+_logger = logging.getLogger("app")
+
 
 @dataclass(frozen=True)
 class AuditEvent:
@@ -36,3 +41,20 @@ def emit_audit(event: AuditEvent) -> None:
             "at": event.at.isoformat(),
         },
     )
+
+# ============================
+# Stage-2: Redis lifecycle hook
+# ============================
+
+def register_cache_shutdown(app: FastAPI) -> None:
+    """
+    Registers a FastAPI shutdown event to gracefully close the Redis connection.
+    Safe to call multiple times (FastAPI dedupes handlers by function object).
+    """
+    @app.on_event("shutdown")
+    async def _close_redis_on_shutdown() -> None:
+        try:
+            await close_redis()
+            _logger.info("redis_connection_closed")
+        except Exception as exc:  # pragma: no cover (best-effort cleanup)
+            _logger.warning("redis_close_failed", extra={"error": str(exc)})
