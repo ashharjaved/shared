@@ -1,60 +1,62 @@
+# src/identity/api/schemas.py
 from __future__ import annotations
-
-from pydantic import BaseModel, EmailStr, Field
+from typing import Optional
 from uuid import UUID
-from src.shared.security import Role
-
-
-class BootstrapRequest(BaseModel):
-    tenant_name: str = Field(min_length=1, max_length=255)
-    owner_email: EmailStr
-    owner_password: str = Field(min_length=8, max_length=128)
-    billing_email: EmailStr | None = None
-
-
-class BootstrapResponse(BaseModel):
-    tenant_id: UUID
-    owner_user_id: UUID
-    tenant_name: str
-
-
-class AdminCreateUserRequest(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
-    role: Role
-
-
-class AdminCreateUserResponse(BaseModel):
-    id: UUID
-    email: EmailStr
-    role: Role
-    tenant_id: UUID
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 
 
 class LoginRequest(BaseModel):
-    tenant_name: str
+    tenant_id: UUID
     email: EmailStr
-    password: str
+    password: str = Field(min_length=6, max_length=256)
 
 
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    expires_in: int
+    refresh_token: Optional[str] = None
 
-
-class MeResponse(BaseModel):
-    id: UUID
-    tenant_id: UUID
+class UserCreate(BaseModel):
     email: EmailStr
-    role: Role
+    password: str = Field(min_length=6, max_length=256)
+    role: str = Field(description="One of SUPER_ADMIN, RESELLER_ADMIN, TENANT_ADMIN, STAFF")
+
+class UserRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    email: EmailStr
+    role: str
     is_active: bool
-    is_verified: bool
+    is_verified: bool = False
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
-class ChangePasswordRequest(BaseModel):
-    old_password: str
-    new_password: str
+class TenantCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=200)
+    tenant_type: str = Field(description="One of PLATFORM, RESELLER, CLIENT")
+    parent_tenant_id: Optional[str] = Field(default=None)
+    subscription_plan: str
 
 
-class SuccessResponse(BaseModel):
-    ok: bool = True
+class TenantRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    tenant_type: str
+    subscription_plan: str
+    is_active: bool
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+# Optional helper for refresh/logout flows (used by auth routes)
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class TenantStatusUpdate(BaseModel):
+    is_active: bool

@@ -1,126 +1,162 @@
+"""
+Async Redis connector (append-only friendly).
+
+Policy alignment:
+- REDIS_USAGE.md: Redis is an optimization; DB remains source of truth.
+- TTLs: sessions=30m, rate-limit=1m, cache=5m default (configurable via env).
+- Keys: tenant:{id}:session:{user}, ratelimit:{tenant}:{endpoint}, cache:{tenant}:{object}
+"""
+
 from __future__ import annotations
 
 import os
-import time
-from typing import Any, Optional, Protocol, Tuple, runtime_checkable
-from src.config import get_settings
+import asyncio
+from typing import Optional
+from contextlib import asynccontextmanager
 
-# Use redis.asyncio instead of aioredis
+from redis.asyncio import Redis, ConnectionPool
+
+# redis>=4.2 uses redis.asyncio for asyncio support
 try:
-    from redis import asyncio as aioredis
-except ImportError:
-    aioredis = None  # type: ignore
+    from redis.asyncio import Redis as AsyncRedis, ConnectionPool
+except Exception as exc:  # pragma: no cover
+    raise RuntimeError(
+        "redis-py with asyncio is required. Install: `pip install redis>=4.5`"
+    ) from exc
+
+# -----------------------------
+# Environment / Defaults
+# -----------------------------
+# Add connection validation
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+if not REDIS_URL.startswith(("redis://", "rediss://")):
+    raise ValueError("Invalid REDIS_URL format")
+
+REDIS_SOCKET_TIMEOUT = float(os.getenv("REDIS_SOCKET_TIMEOUT", "2.0"))
+REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "50"))
+
+# Policy-default TTLs (can be overridden per use site)
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", str(30 * 60)))  # 30m
+RATE_LIMIT_TTL_SECONDS = int(os.getenv("RATE_LIMIT_TTL_SECONDS", "60"))    # 1m
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", str(5 * 60)))       # 5m
+
+# -----------------------------
+# Lazy singleton pool + client
+# -----------------------------
+_pool: Optional[ConnectionPool] = None
+_client: Optional[Redis] = None
+_lock = asyncio.Lock()
 
 
-@runtime_checkable
-class CacheBackend(Protocol):
-    async def get(self, key: str) -> Any | None: ...
-    async def setex(self, key: str, ttl_sec: int, value: Any) -> None: ...
-    async def delete(self, key: str) -> None: ...
-
-
-class _InMemoryTTLCache:
+async def _ensure_client() -> AsyncRedis:
     """
-    Process-local TTL cache (MVP). Not multi-process safe.
+    Ensure a global AsyncRedis client exists (lazy, thread-safe).
     """
-    def __init__(self):
-        self._store: dict[Tuple[str, str], Tuple[Any, float]] = {}
+    global _pool, _client
+    if _client is not None:
+        return _client
 
-    async def get(self, key: str) -> Any | None:
-        now = time.time()
-        entry = self._store.get(("k", key))
-        if not entry:
-            return None
-        value, exp = entry
-        if now >= exp:
-            self._store.pop(("k", key), None)
-            return None
-        return value
+    async with _lock:
+        if _client is not None:
+            return _client
 
-    async def setex(self, key: str, ttl_sec: int, value: Any) -> None:
-        self._store[("k", key)] = (value, time.time() + ttl_sec)
+        _pool = ConnectionPool.from_url(
+            REDIS_URL,
+            max_connections=REDIS_MAX_CONNECTIONS,
+            socket_timeout=REDIS_SOCKET_TIMEOUT,
+            decode_responses=True,  # store text (JSON, counters) as str
+        )
+        _client = AsyncRedis(connection_pool=_pool)
+        # quick health check (non-fatal if Redis is down; callers can handle)
+        try:
+            await _client.ping()
+        except Exception:
+            # We intentionally swallow here to avoid boot failure; later calls may still work
+            pass
 
-    async def delete(self, key: str) -> None:
-        self._store.pop(("k", key), None)
+        return _client
 
-
-class _RedisCache:
-    """
-    Thin wrapper to satisfy the CacheBackend Protocol and keep strong typing.
-    """
-    def __init__(self, url: str):
-        # aioredis.from_url returns a Redis[Any]; we don't rely on generics here
-        self._client = aioredis.from_url(url, decode_responses=True)  # type: ignore[union-attr]
-
-    async def get(self, key: str) -> Any | None:
-        return await self._client.get(key)
-
-    async def setex(self, key: str, ttl_sec: int, value: Any) -> None:
-        # redis-py setex signature: setex(name, time, value)
-        await self._client.setex(key, ttl_sec, value)
-
-    async def delete(self, key: str) -> None:
-        await self._client.delete(key)
-
-
-# Global redis client instance
-_redis: Optional[aioredis.Redis] = None  # type: ignore
-
-async def get_redis() -> aioredis.Redis:  # type: ignore
-    """
-    Returns a singleton aioredis client.
-    Uses REDIS_URL env var or defaults to redis://localhost:6379/0.
-    """
-    global _redis
-    if _redis is None:
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        # decode_responses=True so we always get str from redis
-        _redis = aioredis.from_url(  # type: ignore
-            redis_url,
-            encoding="utf-8",
+async def get_redis() -> Redis:
+    """Lazily create a global async Redis client (thread-safe)."""
+    global _pool, _client
+    if _client is not None:
+        return _client
+    async with _lock:
+        if _client is not None:
+            return _client
+        _pool = ConnectionPool.from_url(
+            REDIS_URL,
+            max_connections=REDIS_MAX_CONNECTIONS,
+            socket_timeout=REDIS_SOCKET_TIMEOUT,
             decode_responses=True,
         )
-    return _redis  # type: ignore
+        _client = Redis(connection_pool=_pool)
+        return _client
+
 
 async def close_redis() -> None:
-    """Close redis connection if initialized."""
-    global _redis
-    if _redis is not None:
-        await _redis.close()  # type: ignore
-        _redis = None
-
-
-class Cache:
     """
-    Typed facade that always exposes a non-optional backend.
-    Fixes Pylance `reportOptionalMemberAccess` by avoiding Optional fields.
+    Gracefully close the global client/pool (useful for test teardown).
     """
-    def __init__(self):
-        settings = get_settings()
+    global _client, _pool
+    if _client is not None:
+        try:
+            await _client.close()
+        except Exception:
+            pass
+    if _pool is not None:
+        try:
+            await _pool.disconnect()
+        except Exception:
+            pass
+    _client = None
+    _pool = None
 
-        backend: CacheBackend
-        if aioredis is not None and settings.REDIS_URL:
-            backend = _RedisCache(str(settings.REDIS_URL))
-        else:
-            backend = _InMemoryTTLCache()
+@asynccontextmanager
+async def pipeline(transaction: bool = False):
+    """
+    Async pipeline context manager. Caller awaits `pipe.execute()` manually.
+    """
+    r = await get_redis()
+    pipe = r.pipeline(transaction=transaction)
+    try:
+        yield pipe
+    finally:
+        try:
+            await pipe.reset()
+        except Exception:
+            pass
+# -----------------------------
+# Small convenience helpers
+# -----------------------------
+async def cache_set(key: str, value: str, ttl_seconds: Optional[int] = None) -> None:
+    r = await get_redis()
+    await r.set(key, value, ex=ttl_seconds or CACHE_TTL_SECONDS)
 
-        self._backend: CacheBackend = backend
 
-    async def get(self, key: str) -> Any | None:
-        return await self._backend.get(key)
-
-    async def setex(self, key: str, ttl_sec: int, value: Any) -> None:
-        await self._backend.setex(key, ttl_sec, value)
-
-    async def delete(self, key: str) -> None:
-        await self._backend.delete(key)
+async def cache_get(key: str) -> Optional[str]:
+    r = await get_redis()
+    return await r.get(key)
 
 
-# Singleton accessor (lazy)
-_cache_singleton: Cache | None = None
+@asynccontextmanager
+async def rate_limit_pipeline():
+    """
+    Context manager that yields a pipeline for atomic rate-limit operations.
 
-def get_cache() -> Cache:
-    global _cache_singleton
-    if _cache_singleton is None:
-        _cache_singleton = Cache()
-    return _cache_singleton
+    Example:
+        async with rate_limit_pipeline() as pipe:
+            pipe.incr(key, 1)
+            pipe.expire(key, RATE_LIMIT_TTL_SECONDS)
+            count, _ = await pipe.execute()
+    """
+    r = await get_redis()
+    pipe = r.pipeline(transaction=False)
+    try:
+        yield pipe
+    finally:
+        # redis-py pipeline doesn't need explicit close in asyncio, but be explicit for clarity
+        try:
+            await pipe.reset()
+        except Exception:
+            pass

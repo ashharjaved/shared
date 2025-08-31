@@ -1,47 +1,87 @@
+# src/shared/middleware.py
 from __future__ import annotations
 
-import logging
+import time
 import uuid
-from typing import Callable
 
-from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi import Request
+from starlette.types import ASGIApp, Receive, Scope, Send
 
-from src.shared.database import tenant_ctx, user_ctx, roles_ctx
-from src.shared.security import decode_jwt
+from src.shared.logging import log_event
+from src.config import get_settings
 
-logger = logging.getLogger("app")
+settings=get_settings()
+class CorrelationIdMiddleware:
+    """
+    Ensures every request has a correlation id.
+    - Reads from X-Correlation-ID if provided, otherwise generates one.
+    - Exposes request.state.correlation_id for downstream usage.
+    - Echoes X-Correlation-ID in response headers.
+    """
+    def __init__(self, app: ASGIApp, header_name: str = "X-Correlation-ID"):
+        self.app = app
+        self.header_name = header_name
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive=receive)
+        corr = request.headers.get(self.header_name) or str(uuid.uuid4())
+        request.state.correlation_id = corr
+
+        async def send_wrapper(message):
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers") or [])
+                headers.append((self.header_name.encode(), corr.encode()))
+                message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
-class RequestContextMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        # Request ID for logs
-        req_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-        # Attempt to parse JWT (if present) to prefill context
-        tenant_id = None
-        user_id = None
-        role_val = None
+class RequestLoggingMiddleware:
+    """
+    Lightweight request timing + structured logging.
+    - Logs start/finish with method, path, status, duration_ms.
+    - Adds ENV/SERVICE_NAME context for centralized log search.
+    """
+    def __init__(self, app: ASGIApp):
+        self.app = app
 
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth.split(" ", 1)[1]
-            try:
-                claims = decode_jwt(token)
-                tenant_id = claims.get("tenant_id")
-                user_id = claims.get("sub")
-                role_val = claims.get("role")
-            except Exception:
-                # Leave unauthenticated; route guards will raise
-                pass
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        token_t = tenant_ctx.set(tenant_id)
-        token_u = user_ctx.set(user_id)
-        token_r = roles_ctx.set(role_val)
+        request = Request(scope, receive=receive)
+        corr_id = getattr(request.state, "correlation_id", None)
+        start = time.perf_counter()
 
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = req_id
+        log_event(
+            "HttpRequestStarted",
+            correlation_id=corr_id,
+            method=scope.get("method"),
+            path=scope.get("path"),
+            service="",
+            env=settings.ENVIRONMENT,
+        )
 
-        tenant_ctx.reset(token_t)
-        user_ctx.reset(token_u)
-        roles_ctx.reset(token_r)
-        return response
+        async def send_wrapper(message):
+            if message.get("type") == "http.response.start":
+                status = message.get("status")
+                duration_ms = int((time.perf_counter() - start) * 1000)
+                log_event(
+                    "HttpRequestCompleted",
+                    correlation_id=corr_id,
+                    method=scope.get("method"),
+                    path=scope.get("path"),
+                    status=status,
+                    duration_ms=duration_ms,
+                    service=settings.PROJECT_NAME,
+                    env=settings.ENVIRONMENT,
+                )
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)

@@ -1,38 +1,42 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Optional, List
-from pydantic import BaseModel, Field
-from uuid import UUID
-
-from ..domain.entities import ConfigType
+from typing import Any, Dict, Optional
+from pydantic import BaseModel, Field, ConfigDict
 
 
-# ---------- Requests ----------
+class ConfigReadResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+    key: str
+    value: Dict[str, Any]
+    is_encrypted: bool
+    config_type: str
+    source: str
 
-class SetConfigRequest(BaseModel):
-    config_key: str = Field(min_length=1, max_length=100)
-    config_value: Any
-    config_type: ConfigType = ConfigType.GENERAL
+
+class ConfigUpsertRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    key: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9_.:-]{1,100}$")
+    value: Dict[str, Any]
     is_encrypted: bool = False
+    config_type: str = Field(default="GENERAL")
 
 
-# ---------- Responses (Error Contract compatible) ----------
-
-class ErrorResponse(BaseModel):
-    code: str
-    message: str
-    details: Optional[dict] = None
+class ConfigDeleteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    deleted: bool
 
 
-class ConfigResponse(BaseModel):
-    config_key: str
-    config_value: Optional[Any] = None
-    config_type: ConfigType = ConfigType.GENERAL
-    is_encrypted: bool = False
-    source_level: str
-    updated_at: Optional[datetime] = None
+class RateLimitCheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    endpoint: str
+    per_second: int = Field(ge=1, le=10_000)
+    enable_global: bool = True
+    enable_monthly: bool = False
+    monthly_quota: Optional[int] = Field(default=None, ge=1)
 
 
-class ListConfigsResponse(BaseModel):
-    items: List[ConfigResponse]
+class RateLimitDecisionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+    allowed: bool
+    remaining_in_window: Optional[int] = None
+    reason: Optional[str] = None

@@ -1,0 +1,390 @@
+
+
+############## FILE PATH: domain\exception.py###########################
+class IdentityDomainError(Exception): ...
+class TenantNotFound(IdentityDomainError): ...
+class UserNotFound(IdentityDomainError): ...
+class EmailAlreadyExists(IdentityDomainError): ...
+class InvalidCredentials(IdentityDomainError): ...
+class AccountLocked(IdentityDomainError): ...
+class ForbiddenRoleEscalation(IdentityDomainError): ...
+
+##################### END CONTENT#################################
+
+
+############## FILE PATH: domain\entities\tenant.py###########################
+# src/identity/domain/entities/tenant.py
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+from uuid import UUID
+
+
+class TenantType(str, Enum):
+    PLATFORM = "PLATFORM"
+    RESELLER = "RESELLER"
+    CLIENT = "CLIENT"
+
+class SubscriptionPlan(str, Enum):
+    FREE = "FREE"
+    BASIC = "BASIC"
+    PREMIUM = "PREMIUM"
+    ENTERPRISE = "ENTERPRISE"
+
+@dataclass(frozen=True)
+class Tenant:
+    """
+    Domain entity representing a tenant in the multi-tenant system.
+    
+    A tenant can be:
+    - PLATFORM: The root platform tenant
+    - RESELLER: A reseller managing multiple client tenants
+    - CLIENT: An end client tenant using the platform
+    """
+    id: UUID
+    name: str
+    type: TenantType
+    parent_tenant_id: Optional[UUID]
+    plan: Optional[SubscriptionPlan]
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+    
+    def __post_init__(self) -> None:
+        """Validate tenant invariants."""
+        if not self.name or not self.name.strip():
+            raise ValueError("Tenant name cannot be empty")
+            
+        if self.type == TenantType.PLATFORM and self.parent_tenant_id is not None:
+            raise ValueError("Platform tenant cannot have a parent")
+            
+        if self.type in (TenantType.RESELLER, TenantType.CLIENT) and self.parent_tenant_id is None:
+            raise ValueError(f"{self.type} tenant must have a parent")
+    
+    def is_platform(self) -> bool:
+        """Check if this is the platform tenant."""
+        return self.type == TenantType.PLATFORM
+    
+    def is_reseller(self) -> bool:
+        """Check if this is a reseller tenant."""
+        return self.type == TenantType.RESELLER
+    
+    def is_client(self) -> bool:
+        """Check if this is a client tenant."""
+        return self.type == TenantType.CLIENT
+    
+    def can_have_children(self) -> bool:
+        """Check if this tenant type can have child tenants."""
+        return self.type in (TenantType.PLATFORM, TenantType.RESELLER)
+##################### END CONTENT#################################
+
+
+############## FILE PATH: domain\entities\user.py###########################
+# src/identity/domain/entities/user.py
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
+from uuid import UUID
+
+from src.shared.roles import Role
+
+
+@dataclass(frozen=True)
+class User:
+    """
+    Domain entity representing a user in the system.
+    
+    Users belong to a specific tenant and have a role that determines
+    their permissions within that tenant.
+    """
+    id: UUID
+    tenant_id: UUID
+    email: str
+    password_hash: str
+    role: Role
+    is_active: bool
+    is_verified: bool
+    failed_login_attempts: int
+    last_login: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+    
+    def __post_init__(self) -> None:
+        """Validate user invariants."""
+        if not self.email or "@" not in self.email:
+            raise ValueError("Invalid email address")
+            
+        if not self.password_hash:
+            raise ValueError("Password hash cannot be empty")
+            
+        if self.failed_login_attempts < 0:
+            raise ValueError("Failed login attempts cannot be negative")
+    
+    @property
+    def is_locked(self) -> bool:
+        """Check if user account is locked due to failed login attempts."""
+        return self.failed_login_attempts >= 5
+    
+    @property
+    def can_login(self) -> bool:
+        """Check if user can login (active, verified, not locked)."""
+        return self.is_active and self.is_verified and not self.is_locked
+    
+    def is_super_admin(self) -> bool:
+        """Check if user has super admin privileges."""
+        return self.role == Role.SUPER_ADMIN
+    
+    def is_tenant_admin(self) -> bool:
+        """Check if user is an admin for their tenant."""
+        return self.role in (Role.SUPER_ADMIN, Role.RESELLER_ADMIN, Role.TENANT_ADMIN)
+    
+    def can_manage_role(self, target_role: Role) -> bool:
+        """Check if this user can manage the target role."""
+        from src.shared.roles import can_manage
+        return can_manage(self.role, target_role)
+##################### END CONTENT#################################
+
+
+############## FILE PATH: domain\repositories\tenant_repository.py###########################
+# src/identity/domain/repositories/tenant_repository.py
+
+from abc import ABC, abstractmethod
+from typing import List, Optional
+from uuid import UUID
+
+from src.identity.domain.entities.tenant import Tenant
+
+
+class TenantRepository(ABC):
+    """
+    Repository interface for tenant operations.
+    
+    Provides methods to manage tenant entities with proper
+    abstractions for data access.
+    """
+    
+    @abstractmethod
+    async def create(self, tenant: Tenant) -> Tenant:
+        """
+        Create a new tenant.
+        
+        Args:
+            tenant: Tenant entity to create
+            
+        Returns:
+            The created tenant entity
+            
+        Raises:
+            ConflictError: If tenant name already exists
+        """
+        pass
+    
+    @abstractmethod
+    async def find_by_id(self, tenant_id: UUID) -> Optional[Tenant]:
+        """
+        Find tenant by ID.
+        
+        Args:
+            tenant_id: The tenant ID to search for
+            
+        Returns:
+            Tenant entity if found, None otherwise
+        """
+        pass
+    
+    @abstractmethod
+    async def find_by_name(self, name: str) -> Optional[Tenant]:
+        """
+        Find tenant by name.
+        
+        Args:
+            name: The tenant name to search for
+            
+        Returns:
+            Tenant entity if found, None otherwise
+        """
+        pass
+    
+    @abstractmethod
+    async def list_children(self, parent_id: UUID) -> List[Tenant]:
+        """
+        List all child tenants of a parent tenant.
+        
+        Args:
+            parent_id: The parent tenant ID
+            
+        Returns:
+            List of child tenant entities
+        """
+        pass
+    
+    @abstractmethod
+    async def update(self, tenant: Tenant) -> Tenant:
+        """
+        Update an existing tenant.
+        
+        Args:
+            tenant: Tenant entity with updates
+            
+        Returns:
+            The updated tenant entity
+            
+        Raises:
+            NotFoundError: If tenant doesn't exist
+        """
+        pass
+    
+    @abstractmethod
+    async def list_all(self, limit: int = 100, offset: int = 0) -> List[Tenant]:
+        """
+        List all tenants with pagination.
+        
+        Args:
+            limit: Maximum number of results
+            offset: Number of results to skip
+            
+        Returns:
+            List of tenant entities
+        """
+        pass
+##################### END CONTENT#################################
+
+
+############## FILE PATH: domain\repositories\user_repository.py###########################
+# src/identity/domain/repositories/user_repository.py
+
+from abc import ABC, abstractmethod
+from datetime import datetime
+from typing import List, Optional
+from uuid import UUID
+
+from src.identity.domain.entities.user import User
+from src.shared.roles import Role
+
+
+class UserRepository(ABC):
+    """
+    Repository interface for user operations.
+    
+    Provides methods to manage user entities with proper
+    tenant isolation and security controls.
+    """
+    
+    @abstractmethod
+    async def find_by_email(self, email: str, tenant_id: UUID) -> Optional[User]:
+        """
+        Find user by email within a tenant.
+        
+        Args:
+            email: User email address
+            tenant_id: Tenant ID for isolation
+            
+        Returns:
+            User entity if found, None otherwise
+        """
+        pass
+    
+    @abstractmethod
+    async def find_by_id(self, user_id: UUID) -> Optional[User]:
+        """
+        Find user by ID (with RLS enforcement).
+        
+        Args:
+            user_id: The user ID to search for
+            
+        Returns:
+            User entity if found and accessible, None otherwise
+        """
+        pass
+    
+    @abstractmethod
+    async def save(self, user: User) -> User:
+        """
+        Create a new user.
+        
+        Args:
+            user: User entity to create
+            
+        Returns:
+            The created user entity
+            
+        Raises:
+            ConflictError: If email already exists in tenant
+        """
+        pass
+    
+    @abstractmethod
+    async def update(self, user: User) -> User:
+        """
+        Update an existing user.
+        
+        Args:
+            user: User entity with updates
+            
+        Returns:
+            The updated user entity
+            
+        Raises:
+            NotFoundError: If user doesn't exist or not accessible
+        """
+        pass
+    
+    @abstractmethod
+    async def update_last_login(self, user_id: UUID, login_time: datetime) -> None:
+        """
+        Update user's last login timestamp.
+        
+        Args:
+            user_id: The user ID
+            login_time: The login timestamp
+        """
+        pass
+    
+    @abstractmethod
+    async def increment_failed_logins(self, user_id: UUID) -> int:
+        """
+        Increment failed login attempts counter.
+        
+        Args:
+            user_id: The user ID
+            
+        Returns:
+            The new failed login attempts count
+        """
+        pass
+    
+    @abstractmethod
+    async def reset_failed_logins(self, user_id: UUID) -> None:
+        """
+        Reset failed login attempts counter to zero.
+        
+        Args:
+            user_id: The user ID
+        """
+        pass
+    
+    @abstractmethod
+    async def list_by_tenant(
+        self,
+        tenant_id: UUID,
+        role: Optional[Role] = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[User]:
+        """
+        List users in a tenant with optional role filtering.
+        
+        Args:
+            tenant_id: The tenant ID
+            role: Optional role filter
+            limit: Maximum number of results
+            offset: Number of results to skip
+            
+        Returns:
+            List of user entities
+        """
+        pass
+##################### END CONTENT#################################

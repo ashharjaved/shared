@@ -11,4 +11,5 @@ python-jose[cryptography]
 pydantic[email]
 jwt
 redis 
+aiosqlite
 httpx

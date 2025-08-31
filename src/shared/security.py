@@ -1,175 +1,203 @@
 # src/shared/security.py
-from __future__ import annotations
 
 import logging
-from abc import ABC, abstractmethod
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
-
-import jwt  # PyJWT
-from fastapi import Depends
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from passlib.context import CryptContext
-from passlib.hash import argon2, bcrypt
+from datetime import datetime, timedelta
+from typing import Any, Dict, Optional, Union
 from uuid import UUID
 
-from src.config import get_settings
-from src.identity.domain.value_objects import Role
-from src.shared.exceptions import ForbiddenError, UnauthorizedError
+import jwt
+from passlib.context import CryptContext
 
-logger = logging.getLogger("app.security")
+from src.config import settings
+from src.shared.exceptions import AuthenticationError
 
-# -----------------------------------------------------------------------------
-# Password hashing (Argon2id preferred; bcrypt fallback)
-# -----------------------------------------------------------------------------
-_pwd_ctx = CryptContext(
-    schemes=["argon2", "bcrypt"],
-    deprecated="auto",
-)
+logger = logging.getLogger(__name__)
 
-def hash_password(plain: str) -> str:
-    """Hash a password with argon2id (preferred) or bcrypt (fallback)."""
-    return _pwd_ctx.hash(plain)
-
-def verify_password(plain: str, hashed: str) -> bool:
-    """Verify password against a hash (supports argon2/bcrypt)."""
-    return _pwd_ctx.verify(plain, hashed)
-
-# Optional typed hasher abstraction (kept as in your file)
-class PasswordHasher(ABC):
-    @abstractmethod
-    def hash(self, password: str) -> str: ...
-    @abstractmethod
-    def verify(self, password: str, hashed: str) -> bool: ...
-
-class Argon2PasswordHasher(PasswordHasher):
-    def hash(self, password: str) -> str:
-        return argon2.using(rounds=4).hash(password)  # Argon2id
-    def verify(self, password: str, hashed: str) -> bool:
-        try:
-            return argon2.verify(password, hashed)
-        except Exception:
-            return False
-
-class BcryptPasswordHasher(PasswordHasher):
-    def hash(self, password: str) -> str:
-        return bcrypt.using(rounds=12).hash(password)
-    def verify(self, password: str, hashed: str) -> bool:
-        try:
-            return bcrypt.verify(password, hashed)
-        except Exception:
-            return False
-
-def get_password_hasher() -> PasswordHasher:
-    """Factory driven by settings.PASSWORD_HASH_SCHEME."""
-    scheme = get_settings().PASSWORD_HASH_SCHEME.lower()
-    return Argon2PasswordHasher() if scheme == "argon2" else BcryptPasswordHasher()
-
-# -----------------------------------------------------------------------------
-# JWT helpers (HS256 by default) — payload: {sub, tenant_id, role, iat, exp}
-# -----------------------------------------------------------------------------
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-def encode_jwt(
-    *,
-    sub: str,
-    tenant_id: str,
-    role: str,
-    expires_minutes: int | None = None,
-    extra_claims: Dict[str, Any] | None = None,
-) -> str:
-    settings = get_settings()
-    alg = settings.JWT_ALG
-    exp_minutes = expires_minutes if expires_minutes is not None else settings.JWT_EXPIRE_MINUTES
-
-    now = _now_utc()
-    payload: Dict[str, Any] = {
-        "sub": sub,
-        "tenant_id": tenant_id,
-        "role": role,
-        "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(minutes=exp_minutes)).timestamp()),
-    }
-    if extra_claims:
-        for k, v in extra_claims.items():
-            if k not in {"sub", "tenant_id", "role", "iat", "exp"}:
-                payload[k] = v
-
-    return jwt.encode(payload, settings.JWT_SECRET, algorithm=alg)
-
-def decode_jwt(token: str) -> Dict[str, Any]:
-    settings = get_settings()
-    payload = jwt.decode(
-        token,
-        settings.JWT_SECRET,
-        algorithms=[settings.JWT_ALG],
-        options={"require": ["sub", "tenant_id", "role", "exp", "iat"]},
+# Password hashing context - prefer Argon2id, fallback to bcrypt
+try:
+    pwd_context = CryptContext(
+        schemes=["argon2", "bcrypt"],
+        deprecated="auto",
+        argon2__memory_cost=65536,
+        argon2__time_cost=3,
+        argon2__parallelism=4,
     )
-    if not isinstance(payload.get("sub"), str):
-        raise jwt.InvalidTokenError("Invalid 'sub' claim")
-    if not isinstance(payload.get("tenant_id"), str):
-        raise jwt.InvalidTokenError("Invalid 'tenant_id' claim")
-    if not isinstance(payload.get("role"), str):
-        raise jwt.InvalidTokenError("Invalid 'role' claim")
-    return payload
+except Exception as e:
+    logger.warning(f"Argon2 not available, using bcrypt only: {e}")
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# -----------------------------------------------------------------------------
-# Token Provider abstraction
-# -----------------------------------------------------------------------------
-class TokenProvider(ABC):
-    @abstractmethod
-    def encode(self, *, sub: UUID, tenant_id: UUID, role: Role) -> str: ...
-    @abstractmethod
-    def decode(self, token: str) -> dict[str, Any]: ...
 
-class JWTTokenProvider(TokenProvider):
-    def __init__(self):
-        self.settings = get_settings()
+def hash_password(plain_password: str) -> str:
+    """
+    Hash a plain text password using Argon2id (preferred) or bcrypt.
+    
+    Args:
+        plain_password: The plain text password to hash
+        
+    Returns:
+        The hashed password string
+        
+    Raises:
+        ValueError: If password is empty or None
+    """
+    if not plain_password:
+        raise ValueError("Password cannot be empty")
+    
+    return pwd_context.hash(plain_password)
 
-    def encode(self, *, sub: UUID, tenant_id: UUID, role: Role) -> str:
-        now = _now_utc()
-        exp = now + timedelta(minutes=self.settings.JWT_EXPIRE_MINUTES)
-        payload = {
-            "sub": str(sub),
-            "tenant_id": str(tenant_id),
-            "role": role.value,
-            "iat": int(now.timestamp()),
-            "exp": int(exp.timestamp()),
-        }
-        return jwt.encode(payload, self.settings.JWT_SECRET, algorithm=self.settings.JWT_ALG)
 
-    def decode(self, token: str) -> dict[str, Any]:
-        try:
-            return jwt.decode(token, self.settings.JWT_SECRET, algorithms=[self.settings.JWT_ALG])
-        except jwt.ExpiredSignatureError as e:
-            raise UnauthorizedError("Token expired") from e
-        except jwt.InvalidTokenError as e:
-            raise UnauthorizedError("Invalid token") from e
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify a plain text password against a hash.
+    
+    Args:
+        plain_password: The plain text password to verify
+        hashed_password: The stored password hash
+        
+    Returns:
+        True if password matches, False otherwise
+    """
+    if not plain_password or not hashed_password:
+        return False
+    
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception as e:
+        logger.error(f"Password verification error: {e}")
+        return False
 
-def get_token_provider() -> TokenProvider:
-    return JWTTokenProvider()
+def _jwt_signing_key() -> Any:
+    if settings.JWT_ALGORITHM == "RS256":
+        return settings.JWT_PRIVATE_KEY
+    return settings.JWT_SECRET
 
-# -----------------------------------------------------------------------------
-# FastAPI dependencies
-# -----------------------------------------------------------------------------
-_bearer = HTTPBearer(auto_error=False)
+def _jwt_verify_key() -> Any:
+    if settings.JWT_ALGORITHM == "RS256":
+        return settings.JWT_PUBLIC_KEY
+    return settings.JWT_SECRET
 
-async def auth_credentials(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> dict | None:
-    if not creds:
-        return None
-    provider = get_token_provider()
-    return provider.decode(creds.credentials)
+def create_access_token(
+    sub: Union[str, UUID],
+    tenant_id: UUID,
+    role: str,
+    expires_delta: Optional[timedelta] = None
+) -> str:
+    """
+    Create a JWT access token with user claims.
+    
+    Args:
+        sub: Subject (user ID)
+        tenant_id: Tenant ID for the user
+        role: User's role
+        expires_delta: Token expiration time (defaults to config setting)
+        
+    Returns:
+        Encoded JWT token string
+    """
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode: Dict[str, Any] = {
+        "sub": str(sub),
+        "tenant_id": str(tenant_id),
+        "role": role,
+        "iat": int(datetime.utcnow().timestamp()),
+        "exp": int(expire.timestamp()),
+        "typ": "access",
+    }    
+    return jwt.encode(to_encode, _jwt_signing_key(), algorithm=settings.JWT_ALGORITHM)
 
-def require_auth(jwt_claims: dict | None = Depends(auth_credentials)) -> dict:
-    if not jwt_claims:
-        raise UnauthorizedError("Missing or invalid Authorization header")
-    return jwt_claims
 
-def require_roles(*allowed: Role):
-    async def _dep(jwt_claims: dict = Depends(require_auth)) -> dict:
-        role = jwt_claims.get("role")
-        if role not in [r.value for r in allowed]:
-            raise ForbiddenError("Insufficient role")
-        return jwt_claims
-    return _dep
+def create_refresh_token(
+    sub: Union[str, UUID],
+    tenant_id: Union[str, UUID],
+    role: str,
+    expires_delta: Optional[timedelta] = None
+) -> str:
+    """
+    Create a JWT refresh token.
+    
+    Args:
+        sub: Subject (user ID)
+        tenant_id: Tenant ID for the user
+        expires_delta: Token expiration time (defaults to 7 days)
+        
+    Returns:
+        Encoded JWT refresh token string
+    """
+    expire = datetime.utcnow() + (expires_delta or timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS))
+    payload = {
+        "sub": str(sub),
+        "tenant_id": str(tenant_id),
+        "role": role,
+        "iat": int(datetime.utcnow().timestamp()),
+        "exp": int(expire.timestamp()),
+        "typ": "refresh",
+    }
+    return jwt.encode(payload, _jwt_signing_key(), algorithm=settings.JWT_ALGORITHM)
+
+
+def decode_token(token: str) -> Dict[str, Any]:
+    """
+    Decode and verify a JWT token.
+    
+    Args:
+        token: The JWT token string to decode
+        
+    Returns:
+        Dictionary containing the token payload
+        
+    Raises:
+        AuthenticationError: If token is invalid, expired, or malformed
+    """
+    try:
+        return jwt.decode(token, _jwt_verify_key(), algorithms=[settings.JWT_ALGORITHM], options={"verify_exp": True})
+    except jwt.ExpiredSignatureError:
+        raise AuthenticationError("Token has expired")
+    except jwt.InvalidTokenError as e:
+        raise AuthenticationError(f"Invalid token: {e}")
+
+
+def extract_user_id_from_token(token: str) -> UUID:
+    """
+    Extract user ID from a JWT token.
+    
+    Args:
+        token: The JWT token string
+        
+    Returns:
+        User ID as UUID
+        
+    Raises:
+        AuthenticationError: If token is invalid or missing user ID
+    """
+    payload = decode_token(token)
+    try:
+        return UUID(payload["sub"])
+    except (ValueError, KeyError):
+        raise AuthenticationError("Invalid user ID in token")
+
+
+def extract_tenant_id_from_token(token: str) -> UUID:
+    """
+    Extract tenant ID from a JWT token.
+    
+    Args:
+        token: The JWT token string
+        
+    Returns:
+        Tenant ID as UUID
+        
+    Raises:
+        AuthenticationError: If token is invalid or missing tenant ID
+    """
+    payload = decode_token(token)
+    try:
+        return UUID(payload["tenant_id"])
+    except (ValueError, KeyError):
+        raise AuthenticationError("Invalid tenant ID in token")
+    
+def get_tenant_id_from_token(token: str) -> UUID:
+    payload = decode_token(token)
+    try:
+        return UUID(payload["tenant_id"])
+    except Exception:
+        raise AuthenticationError("Invalid tenant_id in token")
