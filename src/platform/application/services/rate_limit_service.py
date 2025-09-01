@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Optional
+import json
+from typing import Optional, Tuple
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.shared.exceptions import DomainError
 from src.platform.domain.entities.rate_limit_policy import RateLimitScope
@@ -12,7 +14,10 @@ from src.platform.domain.repositories.rate_limit_repository import RateLimitRepo
 from src.platform.infrastructure.repositories.rate_limit_repository_impl import RateLimitRepositoryImpl
 from src.platform.infrastructure.cache.redis_client import RedisClient
 from src.platform.application.dtos import EffectiveRateLimitDTO, RateLimitDecisionDTO
-
+try:
+    from redis.asyncio import Redis  # type: ignore
+except Exception:  # pragma: no cover
+    Redis = object  # fallback for typing only
 
 class RateLimitedError(DomainError):
     code = "rate_limited"
@@ -101,3 +106,4 @@ class RateLimitService:
                 raise RateLimitedError("Monthly quota exceeded")
 
         return RateLimitDecisionDTO(allowed=True, remaining_in_window=max(0, per_second - count))
+    

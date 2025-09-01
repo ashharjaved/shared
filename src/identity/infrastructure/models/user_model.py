@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
-
+from typing import TYPE_CHECKING
 from sqlalchemy import (
     Boolean, DateTime, ForeignKey, Index, Integer, Text,
     UUID as SQLAlchemy_UUID, UniqueConstraint
@@ -13,11 +13,13 @@ from sqlalchemy.dialects.postgresql import CITEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
-from identity.infrastructure.models.tenant_model import TenantModel
 from src.shared.database import Base
 from src.identity.domain.entities.user import User
-from shared.roles import Role
+from src.shared.roles import Role
 
+if TYPE_CHECKING:
+    # Only for type checkers; does NOT run at import time, so no cycle
+    from .tenant_model import TenantModel
 
 class UserModel(Base):
     """SQLAlchemy model for users table."""

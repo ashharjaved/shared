@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     # Platform / Cache TTLs
     # ------------------------------------------------------------------------------------
     CONFIG_TTL_SECONDS: int = Field(default=60)
+    WHATSAPP_VERIFY_TOKEN: str = Field(default="1f2iedKEuDo4BMubbGW1d5uY76", min_length=10)
+    WHATSAPP_APP_SECRET: str = Field(default="1f2iedKEuDo4BMubbGW1d5uY76", min_length=10)
 
     # ------------------------------------------------------------------------------------
     # Feature Flags / Misc

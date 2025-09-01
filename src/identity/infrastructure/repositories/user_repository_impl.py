@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 
 from src.identity.domain.entities.user import User
 from src.identity.domain.repositories.user_repository import UserRepository
-from shared.roles import Role
+from src.shared.roles import Role
 from src.identity.infrastructure.models.user_model import UserModel
 from src.shared.exceptions import ConflictError, NotFoundError
 from src.shared.database import set_rls_guc
@@ -50,7 +50,7 @@ class UserRepositoryImpl(UserRepository):
     async def create(self, user: User) -> User:
         """Create a new user."""
         # Set tenant context for RLS
-        await set_rls_guc(self._session, user_id=str(user.tenant_id))
+        await set_rls_guc(self._session, tenant_id=str(user.tenant_id))
         
         try:
             model = UserModel.from_domain(user)

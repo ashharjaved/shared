@@ -26,3 +26,5 @@ class RateLimitDecisionDTO:
     allowed: bool
     remaining_in_window: Optional[int] = None
     reason: Optional[str] = None
+    monthly_quota: Optional[int] = None
+    remaining_monthly: Optional[int] = None

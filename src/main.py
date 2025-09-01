@@ -8,7 +8,6 @@ from pydantic import ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.shared.exceptions import DomainError
-from src.shared.error_codes import ERROR_CODES
 from src.shared.exceptions import register_exception_handlers  # central mapping
 from src.dependencies import extract_bearer_token
 from src.shared import security
@@ -21,6 +20,9 @@ from src.identity.api.routes.tokens import router as tokens_router  # type: igno
 # Platform routers (new)
 from src.platform.api.routes.config_routes import router as config_router
 from src.platform.api.routes.limit_routes import router as limit_router
+
+# Health router (new)
+from src.shared.health import router as health_router
 
 
 class JwtContextMiddleware(BaseHTTPMiddleware):
@@ -76,10 +78,20 @@ def create_app() -> FastAPI:
     app.include_router(tokens_router)
     app.include_router(config_router)
     app.include_router(limit_router)
+    app.include_router(health_router)
 
     # Centralized error handling → {code, message, details?, correlation_id?}
     register_exception_handlers(app)
 
+# Root endpoint
+    @app.get("/", tags=["Root"])
+    async def root():
+        """Root endpoint."""
+        return {
+            "message": "WhatsApp Chatbot Platform API",
+            "docs": "/docs",
+            "health": "/health",
+        }
     # Back-compat handlers (kept harmless; central handler covers most)
     @app.exception_handler(DomainError)
     async def domain_error_handler(_req: Request, exc: DomainError):

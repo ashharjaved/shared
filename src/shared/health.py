@@ -1,3 +1,4 @@
+from time import perf_counter
 from fastapi import APIRouter, status, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -19,8 +20,7 @@ async def health_redis():
             content={"service": "redis", "status": "unavailable"},
         )
 
-@router.get("/_health/db")
-async def health_db(db: AsyncSession = Depends(get_db_session)):
+async def health_db_old(db: AsyncSession = Depends(get_db_session)):
     try:
         await db.execute(text("SELECT 1"))
         return {"service": "postgres", "status": "ok"}
@@ -28,4 +28,25 @@ async def health_db(db: AsyncSession = Depends(get_db_session)):
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"service": "postgres", "status": "unavailable"},
+        )
+
+@router.get("/_health/db", status_code=status.HTTP_200_OK)
+async def health_db():
+    Session = get_db_session()
+    t0 = perf_counter()
+    try:
+        async with Session() as s:
+            await s.execute(text("SELECT 1"))
+        dt_ms = int((perf_counter() - t0) * 1000)
+        return {"ok": True, "checks": {"db_select_1_ms": dt_ms}}
+    except Exception as e:
+        # Return 503 with the error string so you can SEE the real cause
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "ok": False,
+                "checks": {"db": "SELECT 1 failed"},
+                "error": type(e).__name__,
+                "detail": str(e),
+            },
         )

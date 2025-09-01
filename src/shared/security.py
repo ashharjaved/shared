@@ -4,13 +4,15 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Union
 from uuid import UUID
-
+from cryptography.fernet import Fernet, InvalidToken
+import os
 import jwt
 from passlib.context import CryptContext
-
+from dotenv import load_dotenv 
 from src.config import settings
 from src.shared.exceptions import AuthenticationError
 
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Password hashing context - prefer Argon2id, fallback to bcrypt
@@ -201,3 +203,30 @@ def get_tenant_id_from_token(token: str) -> UUID:
         return UUID(payload["tenant_id"])
     except Exception:
         raise AuthenticationError("Invalid tenant_id in token")
+    
+_ENC_KEY = os.getenv("APP_ENCRYPTION_KEY")
+if not _ENC_KEY:
+    raise RuntimeError("APP_ENCRYPTION_KEY not set in environment")
+_fernet = Fernet(_ENC_KEY.encode())
+
+def get_encryptor():
+    """
+    Returns a callable that encrypts a string -> str (base64 encoded).
+    Used for storing access tokens, webhook secrets, etc.
+    """
+    def _encrypt(plain: str) -> str:
+        return _fernet.encrypt(plain.encode()).decode()
+    return _encrypt
+
+
+def get_decryptor():
+    """
+    Returns a callable that decrypts a string -> str (plaintext).
+    Used for reading back sensitive values from DB.
+    """
+    def _decrypt(cipher: str) -> str:
+        try:
+            return _fernet.decrypt(cipher.encode()).decode()
+        except InvalidToken:
+            raise ValueError("Decryption failed – invalid key or corrupted data")
+    return _decrypt

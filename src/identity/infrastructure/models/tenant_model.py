@@ -4,14 +4,20 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, UUID as SQLAlchemy_UUID
 from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
-from identity.infrastructure.models.user_model import UserModel
+
 from src.identity.domain.entities.tenant import SubscriptionPlan
 from src.shared.database import Base
 from src.identity.domain.entities.tenant import Tenant, TenantType
+
+if TYPE_CHECKING:
+    # Only for type checkers; does NOT run at import time, so no cycle
+    from .user_model import UserModel
 
 class TenantModel(Base):
     """SQLAlchemy model for tenants table."""

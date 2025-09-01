@@ -14,7 +14,7 @@ from src.shared.error_codes import ERROR_CODES
 
 
 # --- DB engine / session factory ---
-DB_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./dev.db")
+DB_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:123456@localhost:5432/centralize_api")
 engine = create_async_engine(DB_URL, echo=False, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -68,11 +68,10 @@ async def get_db_session(request: Request) -> AsyncGenerator[AsyncSession, None]
 
 
 # --- Repository constructors (adjust import paths if your repos live elsewhere) ---
-def get_user_repo(session: AsyncSession = Depends(get_db_session)):
+async def get_user_repo(session: AsyncSession = Depends(get_db_session)):
     # Example expected protocol: find_by_email, get_by_id, create, change_role, deactivate, reactivate, exists_by_email_in_tenant, ...
-    from src.identity.infrastructure.user_repository_impl import UserRepository  # type: ignore
-    return UserRepository(session)
-
+    from src.identity.infrastructure.repositories.user_repository_impl import (UserRepositoryImpl,)  # type: ignore
+    return UserRepositoryImpl(session)
 
 def get_tenant_repo(session: AsyncSession = Depends(get_db_session)):
     from src.identity.infrastructure.tenant_repository_impl import TenantRepository  # type: ignore
