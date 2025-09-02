@@ -14,7 +14,7 @@ from src.shared.exceptions import AuthorizationError, DomainConflictError, NotFo
 router = APIRouter(prefix="/api/identity/tenants", tags=["identity:tenants"])
 
 
-@router.post("", response_model=TenantRead, dependencies=[Depends(require_role(Role.RESELLER_ADMIN))])
+@router.post("", response_model=TenantRead, dependencies=[Depends(require_role(Role.SUPER_ADMIN))])
 async def create_tenant(
     payload: TenantCreate,
     request: Request,
@@ -25,7 +25,7 @@ async def create_tenant(
     user_svc = __import__("src.identity.application.services.user_service", fromlist=["UserService"]).UserService(user_repo=user_repo, tenant_repo=tenant_repo)
     svc = TenantService(tenant_repo=tenant_repo, user_service=user_svc)
     try:
-        tenant = svc.create_tenant(
+        tenant = await svc.create_tenant(
             requester=current_user,
             name=payload.name,
             tenant_type=payload.tenant_type,
@@ -39,7 +39,7 @@ async def create_tenant(
         raise HTTPException(status_code=e.status_code, detail={"code": e.code, "message": str(e)})
 
 
-@router.get("", response_model=list[TenantRead], dependencies=[Depends(require_role(Role.RESELLER_ADMIN))])
+@router.get("", response_model=list[TenantRead], dependencies=[Depends(require_role(Role.SUPER_ADMIN))])
 async def list_tenants(
     current_user = Depends(get_current_user),
     tenant_repo=Depends(get_tenant_repo),
@@ -54,7 +54,7 @@ async def list_tenants(
     return [TenantRead.model_validate(t) for t in items]
 
 
-@router.put("/{tenant_id}", response_model=TenantRead, dependencies=[Depends(require_role(Role.RESELLER_ADMIN))])
+@router.put("/{tenant_id}", response_model=TenantRead, dependencies=[Depends(require_role(Role.SUPER_ADMIN))])
 async def update_tenant_status(
     tenant_id: str,
     payload: TenantStatusUpdate,

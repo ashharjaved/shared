@@ -5,6 +5,7 @@ import os
 from typing import AsyncGenerator, Optional
 
 from fastapi import Depends, HTTPException, Request
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy import text
 
@@ -18,6 +19,10 @@ DB_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:123456@localho
 engine = create_async_engine(DB_URL, echo=False, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="/api/identity/auth/login",
+    description="Paste the raw JWT access token (no 'Bearer ' prefix)."
+)
 
 async def _set_rls_gucs(session: AsyncSession, *, tenant_id: Optional[str], user_id: Optional[str], role: Optional[str]) -> None:
     """
@@ -74,8 +79,8 @@ async def get_user_repo(session: AsyncSession = Depends(get_db_session)):
     return UserRepositoryImpl(session)
 
 def get_tenant_repo(session: AsyncSession = Depends(get_db_session)):
-    from src.identity.infrastructure.tenant_repository_impl import TenantRepository  # type: ignore
-    return TenantRepository(session)
+    from src.identity.infrastructure.repositories.tenant_repository_impl import TenantRepositoryImpl  # type: ignore
+    return TenantRepositoryImpl(session)
 
 def require_role(required_role: Role):
     """
@@ -107,7 +112,7 @@ async def get_current_user(
         data = ERROR_CODES["invalid_credentials"]
         raise HTTPException(status_code=data["http"], detail={"code": "invalid_credentials", "message": data["message"]})
     user_id = claims.get("sub")
-    user = await user_repo.get_by_id(user_id) if callable(getattr(user_repo, "get_by_id", None)) else user_repo.get_by_id(user_id)
+    user = await user_repo.find_by_id(user_id) if callable(getattr(user_repo, "find_by_id", None)) else user_repo.find_by_id(user_id)
     if not user:
         data = ERROR_CODES["user_not_found"]
         raise HTTPException(status_code=data["http"], detail={"code": "user_not_found", "message": data["message"]})
@@ -118,5 +123,11 @@ async def get_current_user(
 def extract_bearer_token(request: Request) -> Optional[str]:
     auth = request.headers.get("Authorization", "")
     if not auth.lower().startswith("bearer "):
+        return None
+    return auth.split(" ", 1)[1].strip()
+
+def try_extract_bearer(req: Request) -> Optional[str]:
+    auth = req.headers.get("Authorization", "")
+    if not auth or not auth.lower().startswith("bearer "):
         return None
     return auth.split(" ", 1)[1].strip()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, status
 
-from shared.security import get_decryptor, get_encryptor
+from src.shared.security import get_decryptor, get_encryptor
 from src.messaging.api.schemas import ChannelCreate, ChannelResponse
 from src.messaging.application.services.channel_service import ChannelService
 from src.messaging.domain.repositories.channel_repository import ChannelRepository

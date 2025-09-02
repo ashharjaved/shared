@@ -18,7 +18,7 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
-  CREATE TYPE tenant_type_enum AS ENUM ('PLATFORM', 'RESELLER', 'CLIENT');
+  CREATE TYPE tenant_type_enum AS ENUM ('PLATFORM_OWNER', 'RESELLER', 'CLIENT');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
@@ -215,7 +215,7 @@ CREATE TRIGGER tr_users_outbox_created
 /*
 -- Seed a platform tenant and super admin (replace UUID + real Argon2id hash)
 INSERT INTO tenants (id, name, type, plan, is_active)
-VALUES ('00000000-0000-0000-0000-000000000000', 'Platform', 'PLATFORM', 'ENTERPRISE', true)
+VALUES ('00000000-0000-0000-0000-000000000000', 'Platform', 'PLATFORM_OWNER', 'ENTERPRISE', true)
 ON CONFLICT (name) DO NOTHING;
 
 -- SET LOCAL app.jwt_tenant='00000000-0000-0000-0000-000000000000';

@@ -29,7 +29,7 @@ async def create_user(
 ) -> UserRead:
     svc = UserService(user_repo=user_repo, tenant_repo=tenant_repo)
     try:
-        user = svc.create_user(requester=current_user, data=payload.model_dump(), correlation_id=request.headers.get("X-Correlation-ID"))
+        user =await svc.create_user(requester=current_user, data=payload.model_dump(), correlation_id=request.headers.get("X-Correlation-ID"))
         return UserRead.model_validate(user)
     except (DomainConflictError, AuthorizationError, NotFoundError) as e:
         raise HTTPException(status_code=e.status_code, detail={"code": e.code, "message": str(e)})

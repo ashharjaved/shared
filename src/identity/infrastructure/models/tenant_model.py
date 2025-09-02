@@ -30,7 +30,7 @@ class TenantModel(Base):
         server_default=func.gen_random_uuid()
     )
     name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    type: Mapped[TenantType] = mapped_column(
+    type: Mapped[TenantType] = mapped_column("tenant_type",
         PG_ENUM(TenantType, name="tenant_type_enum", create_type=False),
         nullable=False
     )
@@ -40,7 +40,7 @@ class TenantModel(Base):
         ForeignKey("tenants.id", ondelete="RESTRICT"),
         nullable=True
     )
-    plan: Mapped[Optional["SubscriptionPlan"]] = mapped_column(
+    plan: Mapped[Optional["SubscriptionPlan"]] = mapped_column("subscription_plan",
         PG_ENUM(SubscriptionPlan, name="subscription_plan_enum", create_type=False),
         nullable=True
     )
@@ -63,7 +63,7 @@ class TenantModel(Base):
     )
     
     __table_args__ = (
-        Index("idx_tenants_type", "type"),
+        Index("idx_tenants_type", "tenant_type"),
         Index("ix_tenants_parent_tenant_id", "parent_tenant_id"),)
     
     def to_domain(self) -> Tenant:

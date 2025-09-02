@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
-from shared.cache import get_redis
-from shared.dependencies import get_channel_limits_cb
+from src.shared.cache import get_redis
+from src.shared.dependencies import get_channel_limits_cb
 from src.messaging.application.services.webhook_service import WebhookService
 from src.messaging.application.services.message_service import MessageService
 from src.messaging.domain.repositories.channel_repository import ChannelRepository

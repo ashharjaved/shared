@@ -7,8 +7,8 @@ from typing import Callable, Optional, Dict, Any, Tuple,Awaitable
 from redis import Redis
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from messaging.infrastructure.models.channel_model import WhatsAppChannelModel
-from shared.cache import get_redis
+from src.messaging.infrastructure.models.channel_model import WhatsAppChannelModel
+from src.shared.cache import get_redis
 from .database import get_session, set_rls_guc, AsyncSession
 import os
 

@@ -189,7 +189,7 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
-  CREATE TYPE tenant_type_enum AS ENUM ('PLATFORM', 'RESELLER', 'CLIENT');
+  CREATE TYPE tenant_type_enum AS ENUM ('PLATFORM_OWNER', 'RESELLER', 'CLIENT');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN

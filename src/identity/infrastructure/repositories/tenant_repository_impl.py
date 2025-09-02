@@ -30,6 +30,7 @@ class TenantRepositoryImpl(TenantRepository):
             model = TenantModel.from_domain(tenant)
             self._session.add(model)
             await self._session.flush()
+            await self._session.commit() 
             await self._session.refresh(model)
             return model.to_domain()
         except IntegrityError as e:
@@ -78,6 +79,7 @@ class TenantRepositoryImpl(TenantRepository):
             model.updated_at = tenant.updated_at
             
             await self._session.flush()
+            await self._session.commit() 
             await self._session.refresh(model)
             return model.to_domain()
         except IntegrityError as e:

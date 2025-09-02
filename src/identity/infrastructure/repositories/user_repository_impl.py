@@ -56,6 +56,7 @@ class UserRepositoryImpl(UserRepository):
             model = UserModel.from_domain(user)
             self._session.add(model)
             await self._session.flush()
+            await self._session.commit() 
             await self._session.refresh(model)
             return model.to_domain()
         except IntegrityError as e:
@@ -88,6 +89,7 @@ class UserRepositoryImpl(UserRepository):
             model.updated_at = user.updated_at
             
             await self._session.flush()
+            await self._session.commit() 
             await self._session.refresh(model)
             return model.to_domain()
         except IntegrityError as e:

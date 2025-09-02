@@ -1,9 +1,11 @@
 # src/identity/api/schemas.py
 from __future__ import annotations
+from datetime import datetime
 from typing import Optional
 from uuid import UUID
-from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from pydantic import BaseModel, EmailStr, Field, ConfigDict, AliasChoices
 
+from src.identity.domain.entities.tenant import SubscriptionPlan, TenantType
 
 class LoginRequest(BaseModel):
     tenant_id: UUID
@@ -18,6 +20,8 @@ class LoginResponse(BaseModel):
     refresh_token: Optional[str] = None
 
 class UserCreate(BaseModel):
+    tenant_id: UUID
+    name: str = Field(min_length=2, max_length=200)
     email: EmailStr
     password: str = Field(min_length=6, max_length=256)
     role: str = Field(description="One of SUPER_ADMIN, RESELLER_ADMIN, TENANT_ADMIN, STAFF")
@@ -30,8 +34,10 @@ class UserRead(BaseModel):
     role: str
     is_active: bool
     is_verified: bool = False
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
 
 
 class TenantCreate(BaseModel):
@@ -44,13 +50,15 @@ class TenantCreate(BaseModel):
 class TenantRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: UUID
     name: str
-    tenant_type: str
-    subscription_plan: str
+    tenant_type: TenantType = Field(validation_alias=AliasChoices('tenant_type', 'type'))
+    subscription_plan: SubscriptionPlan = Field(validation_alias=AliasChoices('subscription_plan', 'plan'))
     is_active: bool
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
 # Optional helper for refresh/logout flows (used by auth routes)

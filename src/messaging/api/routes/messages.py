@@ -3,8 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, status, HTTPException
 from uuid import UUID
 
-from shared.cache import get_redis
-from shared.dependencies import get_channel_limits_cb
+from src.shared.cache import get_redis
+from src.shared.dependencies import get_channel_limits_cb
 from src.messaging.api.schemas import MessageSendRequest, MessageResponse
 from src.messaging.application.services.message_service import MessageService
 from src.messaging.domain.repositories.message_repository import MessageRepository

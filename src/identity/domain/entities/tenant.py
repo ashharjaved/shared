@@ -8,7 +8,7 @@ from uuid import UUID
 
 
 class TenantType(str, Enum):
-    PLATFORM = "PLATFORM"
+    PLATFORM_OWNER = "PLATFORM_OWNER"
     RESELLER = "RESELLER"
     CLIENT = "CLIENT"
 
@@ -42,7 +42,7 @@ class Tenant:
         if not self.name or not self.name.strip():
             raise ValueError("Tenant name cannot be empty")
             
-        if self.type == TenantType.PLATFORM and self.parent_tenant_id is not None:
+        if self.type == TenantType.PLATFORM_OWNER and self.parent_tenant_id is not None:
             raise ValueError("Platform tenant cannot have a parent")
             
         if self.type in (TenantType.RESELLER, TenantType.CLIENT) and self.parent_tenant_id is None:
@@ -50,7 +50,7 @@ class Tenant:
     
     def is_platform(self) -> bool:
         """Check if this is the platform tenant."""
-        return self.type == TenantType.PLATFORM
+        return self.type == TenantType.PLATFORM_OWNER
     
     def is_reseller(self) -> bool:
         """Check if this is a reseller tenant."""
@@ -62,4 +62,4 @@ class Tenant:
     
     def can_have_children(self) -> bool:
         """Check if this tenant type can have child tenants."""
-        return self.type in (TenantType.PLATFORM, TenantType.RESELLER)
+        return self.type in (TenantType.PLATFORM_OWNER, TenantType.RESELLER)

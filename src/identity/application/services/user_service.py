@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+from uuid import UUID
 
 from src.shared.roles import Role, can_manage_user, has_min_role
 from src.shared.security import settings
@@ -11,6 +12,7 @@ from src.shared.error_codes import ERROR_CODES
 from src.shared.logging import log_event
 from src.shared import security
 
+from src.identity.domain.entities.user import User
 
 @dataclass
 class UserService:
@@ -25,7 +27,7 @@ class UserService:
             data = ERROR_CODES["rls_not_set"]
             raise RlsNotSetError(data["message"], code="rls_not_set", status_code=data["http"])
 
-    def create_user(self, *, requester: Any, data: Dict[str, Any], correlation_id: Optional[str] = None) -> Any:
+    async def create_user(self, *, requester: Any, data: Dict[str, Any], correlation_id: Optional[str] = None) -> Any:
         """
         RBAC:
         - SUPER_ADMIN/RESELLER_ADMIN: can operate broader (scoped policy can evolve).
@@ -52,14 +54,15 @@ class UserService:
             raise AuthorizationError(ERROR_CODES["forbidden"]["message"], code="forbidden", status_code=403)
 
         # Ensure tenant exists
-        tenant = self.tenant_repo.get_by_id(target_tenant)
+        tenant = await self.tenant_repo.find_by_id(target_tenant)
         if not tenant:
             data_ec = ERROR_CODES["tenant_not_found"]
             raise NotFoundError(data_ec["message"], code="tenant_not_found", status_code=data_ec["http"])
 
         # Uniqueness in (tenant_id, email)
         email = data.get("email", "").lower().strip()
-        if self.user_repo.exists_by_email_in_tenant(email=email, tenant_id=target_tenant):
+        existing = await self.user_repo.find_by_email(email=email, tenant_id=UUID(str(target_tenant)))
+        if existing:
             data_ec = ERROR_CODES["email_taken"]
             raise DomainConflictError(data_ec["message"], code="email_taken", status_code=data_ec["http"])
 
@@ -67,15 +70,22 @@ class UserService:
         password = data.get("password")
         password_hash = self.password_hasher(password) if password else None
 
-        user = self.user_repo.create(
-            tenant_id=target_tenant,
+        # Build domain entity to satisfy repo.create(User)
+        new_user = User(
+            id=None,  # let DB default generate UUID
+            tenant_id=UUID(str(target_tenant)),
             email=email,
-            role=data.get("role") or Role.STAFF,
-            full_name=data.get("full_name"),
             password_hash=password_hash,
+            role=data.get("role") or Role.STAFF,
             is_active=True,
-            metadata=data.get("metadata") or {},
+            is_verified=True,
+            failed_login_attempts=0,
+            last_login=None,
+            created_at=None,
+            updated_at=None,
         )
+
+        user = await self.user_repo.create(new_user)
         log_event(
             "UserCreated",
             tenant_id=target_tenant,
@@ -94,7 +104,7 @@ class UserService:
         assert req_tenant is not None, "RLS guard should ensure tenant is set"
         self._ensure_rls(req_tenant)
 
-        target = self.user_repo.get_by_id(target_user_id)
+        target = self.user_repo.find_by_id(target_user_id)
         if not target:
             data_ec = ERROR_CODES["user_not_found"]
             raise NotFoundError(data_ec["message"], code="user_not_found", status_code=data_ec["http"])
@@ -127,7 +137,7 @@ class UserService:
         assert req_tenant is not None, "RLS guard should ensure tenant is set"
         self._ensure_rls(req_tenant)
 
-        target = self.user_repo.get_by_id(target_user_id)
+        target = self.user_repo.find_by_id(target_user_id)
         if not target:
             data_ec = ERROR_CODES["user_not_found"]
             raise NotFoundError(data_ec["message"], code="user_not_found", status_code=data_ec["http"])
@@ -155,7 +165,7 @@ class UserService:
         assert req_tenant is not None, "RLS guard should ensure tenant is set"
         self._ensure_rls(req_tenant)
 
-        target = self.user_repo.get_by_id(target_user_id)
+        target = self.user_repo.find_by_id(target_user_id)
         if not target:
             data_ec = ERROR_CODES["user_not_found"]
             raise NotFoundError(data_ec["message"], code="user_not_found", status_code=data_ec["http"])
