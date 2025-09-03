@@ -19,9 +19,9 @@ class ChannelService:
     async def register_channel(
         self,
         *,
-        name: str,
         phone_number_id: str,
         business_phone: str,
+        webhook_url: str,
         access_token_plain: str,
         is_active: bool = True,
         rate_limit_per_second: Optional[int] = None,
@@ -34,9 +34,9 @@ class ChannelService:
         channel = Channel(
             id=UUID(int=0),  # DB will generate
             tenant_id=tenant_id,
-            name=name,
             phone_number_id=phone_number_id,
             business_phone=business_phone,
+            webhook_url=webhook_url,
             token=access_token_plain,
             webhook_token=webhook_token,
             rate_limit_per_second=rate_limit_per_second,
@@ -60,7 +60,6 @@ class ChannelService:
         updated = Channel(
             id=ch.id,
             tenant_id=ch.tenant_id,
-            name=ch.name,
             phone_number_id=ch.phone_number_id,
             business_phone=ch.business_phone,
             token=ch.token,

@@ -8,10 +8,10 @@ from pydantic import BaseModel, Field, ConfigDict
 
 
 class ChannelCreate(BaseModel):
-    name: str
     phone_number_id: str
     business_phone: str
     access_token: str = Field(..., min_length=10)
+    webhook_url: str
     is_active: bool = True
     rate_limit_per_second: Optional[int] = None
     monthly_message_limit: Optional[int] = None
@@ -23,8 +23,11 @@ class ChannelResponse(BaseModel):
     phone_number_id: str
     business_phone: str
     is_active: bool
+    webhook_url: str
     rate_limit_per_second: Optional[int] = None
     monthly_message_limit: Optional[int] = None
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
 class MessageSendRequest(BaseModel):

@@ -37,11 +37,14 @@ class PostgresChannelRepository(ChannelRepository):
         return Channel(
             id=row.id,
             tenant_id=row.tenant_id,
-            name=getattr(row, "name", None) or f"WA-{row.phone_number_id}",  # tolerate missing name in SQL schema
+            #name=getattr(row, "name", None) or f"WA-{row.phone_number_id}",  # tolerate missing name in SQL schema
             phone_number_id=row.phone_number_id,
             business_phone=row.business_phone,
-            token=self._decrypt(row.access_token),
-            webhook_token=self._decrypt(row.webhook_token),
+            token=None,
+            webhook_token=None,
+            webhook_url=row.webhook_url,
+            #access_token=self._decrypt(row.access_token),
+            #webhook_token=self._decrypt(row.webhook_token),
             rate_limit_per_second=row.rate_limit_per_second,
             monthly_message_limit=row.monthly_message_limit,
             is_active=row.is_active,
@@ -58,6 +61,7 @@ class PostgresChannelRepository(ChannelRepository):
                     phone_number_id=channel.phone_number_id,
                     business_phone=channel.business_phone,
                     access_token=self._encrypt(channel.token),
+                    webhook_url = channel.webhook_url,
                     webhook_token=self._encrypt(channel.webhook_token),
                     rate_limit_per_second=channel.rate_limit_per_second or 10,
                     monthly_message_limit=channel.monthly_message_limit or 100000,

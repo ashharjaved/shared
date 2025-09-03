@@ -30,8 +30,9 @@ class WhatsAppChannelModel(Base):
     business_phone: Mapped[str] = mapped_column(Text, nullable=False)
 
     # Stored encrypted-at-rest (ciphertext). Infra repo encrypts/decrypts.
-    access_token: Mapped[str] = mapped_column(Text, nullable=False)
-    webhook_token: Mapped[str] = mapped_column(Text, nullable=False)
+    access_token: Mapped[str] = mapped_column("access_token_ciphertext",Text, nullable=False)
+    webhook_token: Mapped[str] = mapped_column("webhook_verify_token_ciphertext",Text, nullable=False)
+    webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
 
     rate_limit_per_second: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("10"))
     monthly_message_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("100000"))

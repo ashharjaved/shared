@@ -22,13 +22,13 @@ class Channel:
     id: UUID
     tenant_id: UUID
 
-    name: str
     phone_number_id: str  # Meta Graph "phone_number_id" (string identifier)
     business_phone: str   # E.164 string (validated via PhoneNumber VO in Message entity)
 
     # Sensitive credentials – never log these; infra must store encrypted-at-rest.
     token: str = field(repr=False)
     webhook_token: str = field(repr=False)
+    webhook_url: str
 
     # Rate limits (None == unlimited/enforced elsewhere)
     rate_limit_per_second: Optional[int] = None

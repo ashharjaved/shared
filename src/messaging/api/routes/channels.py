@@ -28,9 +28,9 @@ async def register_channel(
     )
     svc = ChannelService(channel_repo=repo)
     ch = await svc.register_channel(
-        name=body.name,
         phone_number_id=body.phone_number_id,
         business_phone=body.business_phone,
+        webhook_url=body.webhook_url,
         access_token_plain=body.access_token,
         is_active=body.is_active,
         rate_limit_per_second=body.rate_limit_per_second,
@@ -39,9 +39,10 @@ async def register_channel(
     )
     return ChannelResponse(
         id=ch.id,
-        name=ch.name,
+        name=f"WA-{ch.phone_number_id}",
         phone_number_id=ch.phone_number_id,
         business_phone=ch.business_phone,
+        webhook_url=ch.webhook_url,
         is_active=ch.is_active,
         rate_limit_per_second=ch.rate_limit_per_second,
         monthly_message_limit=ch.monthly_message_limit,
@@ -61,9 +62,10 @@ async def list_channels(user=Depends(get_current_user)) -> list[ChannelResponse]
     return [
         ChannelResponse(
             id=c.id,
-            name=c.name,
+            name=f"WA-{c.phone_number_id}",
             phone_number_id=c.phone_number_id,
             business_phone=c.business_phone,
+            webhook_url=c.webhook_url,
             is_active=c.is_active,
             rate_limit_per_second=c.rate_limit_per_second,
             monthly_message_limit=c.monthly_message_limit,
