@@ -1,424 +1,512 @@
-"""
-Outbox Worker
-- Polls unprocessed outbox events
-- For MessageChanged events where message.status == QUEUED: send via WhatsApp
-- Retries with exponential backoff using Redis
-- DLQs after max retries
-- ALWAYS sets `SET LOCAL app.jwt_tenant = :tenant_id` before tenant-scoped DB ops
-"""
+# src/worker/outbox_worker.py
+from __future__ import annotations
 
 import asyncio
 import json
 import os
 import signal
-import sys
-from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-import redis.asyncio as aioredis
+from redis.asyncio import Redis
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
-from src.shared.database import get_engine, get_session  # adjust path if different
-engine = get_engine()
-SessionLocal = get_session()
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine, async_sessionmaker
 
-from dotenv import load_dotenv
-load_dotenv()
-# --------------------------
-# Configuration
-# --------------------------
+# =========================
+# Config
+# =========================
 
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_URL")  # e.g. postgresql+asyncpg://...
-REDIS_URL = os.getenv("REDIS_URL") or os.getenv("REDIS_URL".lower()) or "redis://localhost:6379/0"
-WHATSAPP_API_BASE = os.getenv("WHATSAPP_API_BASE", "https://graph.facebook.com/v21.0")
-MAX_RETRIES = int(os.getenv("OUTBOX_MAX_RETRIES", "5"))
-BACKOFF_BASE_SECONDS = float(os.getenv("OUTBOX_BACKOFF_BASE_SECONDS", "2"))  # 2,4,8,16,...
-BACKOFF_MAX_SECONDS = float(os.getenv("OUTBOX_BACKOFF_MAX_SECONDS", "60"))
+DB_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:123456@localhost:5432/centralize_api")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+# Polling cadence
 POLL_INTERVAL_SECONDS = float(os.getenv("OUTBOX_POLL_INTERVAL_SECONDS", "1.0"))
-BATCH_SIZE = int(os.getenv("OUTBOX_BATCH_SIZE", "50"))
-HTTP_TIMEOUT_SECONDS = float(os.getenv("OUTBOX_HTTP_TIMEOUT_SECONDS", "15"))
+BATCH_SIZE = int(os.getenv("OUTBOX_BATCH_SIZE", "20"))
 
+# Retry/backoff
+MAX_RETRIES = int(os.getenv("OUTBOX_MAX_RETRIES", "5"))
+BACKOFF_BASE_SECONDS = float(os.getenv("OUTBOX_BACKOFF_BASE_SECONDS", "2.0"))
+BACKOFF_MAX_SECONDS = float(os.getenv("OUTBOX_BACKOFF_MAX_SECONDS", "60.0"))
 
-# --------------------------
-# Helpers
-# --------------------------
+# WhatsApp API (replace/extend as needed)
+WHATSAPP_GRAPH_BASE = os.getenv("WHATSAPP_GRAPH_BASE", "https://graph.facebook.com/v21.0")
+
+# =========================
+# Utilities
+# =========================
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-def backoff_seconds(attempt: int) -> float:
-    # attempt starts at 1
-    delay = BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+def backoff_seconds(attempts: int) -> float:
+    # simple exponential backoff with cap
+    delay = BACKOFF_BASE_SECONDS * (2 ** max(0, attempts - 1))
     return min(delay, BACKOFF_MAX_SECONDS)
 
-def redis_keys_for_message(message_id: str):
-    # per-message retry bookkeeping in Redis
+def redis_keys_for_message(message_id: str) -> Dict[str, str]:
+    base = f"msg:{message_id}"
     return {
-        "attempts": f"outbox:msg:{message_id}:attempts",
-        "not_before": f"outbox:msg:{message_id}:not_before_ts",
-        "dlq": f"dlq:messages"  # list
+        "attempts": f"{base}:attempts",
+        "not_before": f"{base}:not_before",
+        "dlq": f"{base}:dlq",
     }
 
-@asynccontextmanager
-async def lifespan_tasks():
-    # graceful shutdown for worker
-    stop_event = asyncio.Event()
+# =========================
+# Data models (event shape)
+# =========================
 
-    def _handle_sig(*_):
-        stop_event.set()
+@dataclass
+class OutboxEvent:
+    id: str
+    tenant_id: Optional[str]
+    aggregate_type: str
+    event_type: str
+    payload: Any
+    created_at: Optional[str]
 
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _handle_sig)
-        except NotImplementedError:
-            pass  # on Windows
+# =========================
+# Worker core
+# =========================
 
-    try:
-        yield stop_event
-    finally:
-        stop_event.set()
+class OutboxWorker:
+    def __init__(self, engine: AsyncEngine, redis: Redis):
+        self.engine = engine
+        self.redis = redis
+        self._stop = asyncio.Event()
 
-
-# --------------------------
-# Infrastructure singletons
-# --------------------------
-
-
-redis = aioredis.from_url(REDIS_URL, decode_responses=True)
-http = httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS)
-
-
-# --------------------------
-# WhatsApp API client
-# --------------------------
-
-async def _compose_wa_payload(message_row: dict) -> dict:
-    """
-    Compose a WA API payload from messages.content_jsonb.
-    Supports simple text messages and raw payload passthrough.
-    """
-    content = message_row["content_jsonb"]
-    if isinstance(content, str):
-        try:
-            content = json.loads(content)
-        except Exception:
-            content = {"text": {"body": content}}
-
-    # minimal support: text or ready-made object (template/media supported upstream)
-    if "text" in content:
-        return {
-            "messaging_product": "whatsapp",
-            "to": message_row["to_phone"],
-            "type": "text",
-            "text": {"body": content["text"]["body"]},
-        }
-
-    # if upstream already built the WA payload structure, pass it through
-    base = {
-        "messaging_product": "whatsapp",
-        "to": message_row["to_phone"],
-    }
-    base.update(content)
-    return base
-
-
-async def send_via_whatsapp(session: AsyncSession, message_id: str) -> tuple[bool, str | None, int | None, str | None]:
-    """
-    Sends a queued message via WhatsApp Graph API.
-    Returns: (success, wa_message_id, http_status, error_text)
-    """
-    # Fetch message & channel (under tenant RLS)
-    # We DO NOT trust outbox payload blindly; we read normalized state from DB.
-    row = (
-        await session.execute(
-            text(
-                """
-                SELECT m.id, m.channel_id, m.to_phone, m.from_phone,
-                       m.content_jsonb, m.status, m.retry_count,
-                       c.phone_number_id, c.business_phone, c.api_token
-                FROM messages m
-                JOIN whatsapp_channels c ON c.id = m.channel_id AND c.tenant_id = m.tenant_id
-                WHERE m.id = :mid
-                """
-            ),
-            {"mid": message_id},
+        self._Session = async_sessionmaker(
+            bind=self.engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
         )
-    ).mappings().first()
 
-    if not row:
-        return (False, None, 404, "message_not_found")
+    def stop(self) -> None:
+        self._stop.set()
 
-    if row["status"] != "QUEUED":
-        return (True, None, 200, "noop_not_queued")
-
-    # Compose request
-    phone_number_id = row["phone_number_id"]
-    bearer = row["api_token"]  # stored encrypted in prod; decrypt upstream if needed
-
-    payload = await _compose_wa_payload(row)
-    url = f"{WHATSAPP_API_BASE}/{phone_number_id}/messages"
-    headers = {"Authorization": f"Bearer {bearer}"}
-
-    try:
-        resp = await http.post(url, headers=headers, json=payload)
-    except httpx.RequestError as e:
-        return (False, None, None, f"network_error:{e.__class__.__name__}")
-
-    # Parse WA response
-    if resp.status_code in (200, 201):
-        data = resp.json()
-        wa_id = None
+    async def run(self) -> None:
+        print("[outbox-worker] starting …", flush=True)
         try:
-            wa_id = data["messages"][0]["id"]
-        except Exception:
-            wa_id = None
-        return (True, wa_id, resp.status_code, None)
+            while not self._stop.is_set():
+                events = await self._fetch_pending_events(limit=BATCH_SIZE)
+                print(f"[outbox-worker] polled; events_seen={len(events)}", flush=True)
 
-    # Common error handling cases we contract-test (429/409)
-    try:
-        err_json = resp.json()
-        err_msg = json.dumps(err_json, separators=(",", ":"), ensure_ascii=False)
-    except Exception:
-        err_msg = resp.text
+                if not events:
+                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                    continue
 
-    return (False, None, resp.status_code, err_msg or "unknown_error")
+                handled = 0
+                async with self._Session() as session:
+                    for evt in events:
+                        try:
+                            await self._handle_event(session, evt)
+                            handled += 1
+                        except Exception as e:
+                            # If a single event explosions, isolate it, mark processed, and push DLQ
+                            print(f"[outbox-worker] error handling event={evt.id}: {e}", flush=True)
+                            try:
+                                await self._mark_event_processed(session, evt.id)
+                            except Exception:
+                                pass
+                            try:
+                                self.redis.lpush(
+                                    "dlq:outbox_events",
+                                    json.dumps(
+                                        {
+                                            "event_id": evt.id,
+                                            "reason": "handler_exception",
+                                            "error": str(e),
+                                            "aggregate_type": evt.aggregate_type,
+                                            "event_type": evt.event_type,
+                                            "ts": _utcnow().isoformat(),
+                                        }
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                    try:
+                        await session.commit()
+                    except Exception:
+                        await session.rollback()
+                        raise
 
+                print(f"[outbox-worker] handled={handled}, skipped={len(events) - handled}", flush=True)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            print("[outbox-worker] stopping", flush=True)
 
-# --------------------------
-# Outbox processing
-# --------------------------
-
-async def fetch_outbox_batch(session: AsyncSession):
-    """
-    Fetch a batch of unprocessed outbox events (skip locked) for concurrent-safe consumption.
-    We keep this query *not* tenant-scoped so the worker can see all events.
-    """
-    res = await session.execute(
-        text(
-            f"""
-            SELECT id, tenant_id, aggregate_type, event_type, payload_jsonb
+    async def _fetch_pending_events(self, limit: int) -> List[OutboxEvent]:
+        # Fetch events that are not yet processed
+        # IMPORTANT: Do not set jwt_tenant here; outbox_events is cross-tenant metadata.
+        query = text(
+            """
+            SELECT id, tenant_id, aggregate_type, event_type, payload_jsonb, created_at
             FROM outbox_events
             WHERE processed_at IS NULL
-            ORDER BY created_at
-            FOR UPDATE SKIP LOCKED
+            ORDER BY created_at ASC
             LIMIT :lim
             """
-        ),
-        {"lim": BATCH_SIZE},
-    )
-    return [dict(r) for r in res.mappings().all()]
+        )
+        async with self.engine.connect() as conn:
+            res = await conn.execute(query, {"lim": limit})
+            rows = res.mappings().all()
 
+        events: List[OutboxEvent] = []
+        for r in rows:
+            payload = r.get("payload_jsonb")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    pass
+            created_at = r.get("created_at")
+            events.append(
+                OutboxEvent(
+                    id=str(r["id"]),
+                    tenant_id=(str(r["tenant_id"]) if r.get("tenant_id") else None),
+                    aggregate_type=r["aggregate_type"],
+                    event_type=r["event_type"],
+                    payload=payload,
+                    created_at=(created_at.isoformat() if created_at is not None else None),
+                )
+            )
+        return events
 
-async def mark_event_processed(session: AsyncSession, event_id: str):
-    await session.execute(
-        text("UPDATE outbox_events SET processed_at = now() WHERE id = :id"),
-        {"id": event_id},
-    )
+    async def _handle_event(self, session: AsyncSession, evt: OutboxEvent) -> None:
+        # Dispatcher
+        if evt.aggregate_type == "Message" and evt.event_type == "MessageChanged":
+            await self._process_message_changed(session, evt)
+            return
 
+        # Unknown event → mark processed (don’t poison)
+        await self._mark_event_processed(session, evt.id)
 
-async def process_message_changed(session: AsyncSession, evt: dict) -> None:
-    """
-    Handles MessageChanged outbox event:
-      - If message.status == QUEUED → attempt send
-      - Retry with exponential backoff via Redis
-      - DLQ after MAX_RETRIES
-    """
-    payload = evt.get("payload") or {}
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception:
-            payload = {}
-
-    message_id = payload.get("id") or payload.get("message_id")
-    status = payload.get("status")
-
-    if not message_id:
-        # malformed event; mark processed to avoid poison loop
-        await mark_event_processed(session, evt["id"])
-        return
-
-    # Backoff gate (Redis): don't attempt before "not_before"
-    keys = redis_keys_for_message(message_id)
-    not_before_ts = await redis.get(keys["not_before"])
-    if not_before_ts is not None:
-        try:
-            nb = float(not_before_ts)
-            if nb > _utcnow().timestamp():
-                # too early — skip without marking processed (will be retried next poll)
-                return
-        except ValueError:
-            pass
-
-    # Only attempt if currently QUEUED (trust DB, not payload)
-    # Set tenant before any tenant-scoped query
-    await session.execute(text("SET LOCAL app.jwt_tenant = :tid"), {"tid": str(evt["tenant_id"])})
-
-    success, wa_id, http_status, error_text = await send_via_whatsapp(session, message_id)
-
-    if success:
-        # Transition message → SENT and store WA id
+    async def _mark_event_processed(self, session: AsyncSession, event_id: str) -> None:
         await session.execute(
             text(
                 """
-                UPDATE messages
-                SET status = 'SENT',
-                    whatsapp_message_id = COALESCE(:waid, whatsapp_message_id),
-                    status_updated_at = now(),
-                    retry_count = 0
-                WHERE id = :mid
+                UPDATE outbox_events
+                SET processed_at = NOW()
+                WHERE id = :eid
                 """
             ),
-            {"mid": message_id, "waid": wa_id},
+            {"eid": event_id},
         )
-        # Mark event done
-        await mark_event_processed(session, evt["id"])
-        return
 
-    # Failure path: decide retry vs DLQ
-    # Increment attempts in Redis
-    attempts = await redis.incr(keys["attempts"])
-    # contract-specific branches
-    if http_status == 409:
-        # Treat idempotency conflict as success/no-op in outbox (don't spam)
-        await mark_event_processed(session, evt["id"])
-        return
+    # =========================
+    # Message handler
+    # =========================
 
-    if http_status == 429 or (http_status is None) or (500 <= (http_status or 500) < 600):
-        # Retryable: schedule next attempt
-        delay = backoff_seconds(attempts)
-        not_before = _utcnow().timestamp() + delay
-        await redis.set(keys["not_before"], str(not_before), ex=int(delay) + 5)
-        # Keep the event unprocessed so we’ll pick it up later
-        # Optionally increment messages.retry_count for visibility
-        await session.execute(
-            text("UPDATE messages SET retry_count = COALESCE(retry_count,0) + 1 WHERE id = :mid"),
+    async def _process_message_changed(self, session: AsyncSession, evt: OutboxEvent) -> None:
+        """
+        Handle MessageChanged:
+          - If message.status == QUEUED → attempt send
+          - Retry with exponential backoff via Redis
+          - DLQ after MAX_RETRIES
+        """
+        payload = evt.payload or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+
+        message_id = payload.get("id") or payload.get("message_id")
+        # status from payload is not trusted; DB is the source of truth.
+        if not message_id:
+            # malformed event; mark processed to avoid poison loop
+            await self._mark_event_processed(session, evt.id)
+            return
+
+        # Backoff gate (Redis): don't attempt before "not_before"
+        keys = redis_keys_for_message(message_id)
+        not_before_ts = await self.redis.get(keys["not_before"])
+        if not_before_ts is not None:
+            try:
+                nb = float(not_before_ts)
+                if nb > _utcnow().timestamp():
+                    eta = int(nb - _utcnow().timestamp())
+                    print(f"[outbox-worker] backoff active for {message_id}; retry in ~{eta}s", flush=True)
+                    return
+            except ValueError:
+                pass
+
+        # Determine tenant_id for RLS (prefer event → payload)
+        tenant_id = evt.tenant_id or payload.get("tenant_id")
+        if not tenant_id:
+            # No tenant context → log + mark processed + DLQ; do not proceed.
+            try:
+                print(
+                    f"[outbox-worker] missing tenant_id for event={evt.id} msg={message_id}; DLQ",
+                    flush=True,
+                )
+            except Exception:
+                pass
+            await self._mark_event_processed(session, evt.id)
+            try:
+                self.redis.lpush(
+                    "dlq:outbox_events",
+                    json.dumps(
+                        {
+                            "event_id": evt.id,
+                            "reason": "missing_tenant_id",
+                            "message_id": message_id,
+                            "evt_payload_keys": list((payload or {}).keys()),
+                            "ts": _utcnow().isoformat(),
+                        }
+                    ),
+                )
+            except Exception:
+                pass
+            return
+
+        # Set tenant context (RLS)
+        await session.execute(text("SELECT set_config('app.jwt_tenant', :tid, true)"), {"tid": str(tenant_id)})
+
+        # Gate on actual DB status to keep idempotency tight
+        res = await session.execute(
+            text("SELECT status FROM messages WHERE id = :mid"),
             {"mid": message_id},
         )
-        # DLQ if over max
-        if attempts >= MAX_RETRIES:
+        row = res.mappings().first()
+        if not row:
+            # Not visible (RLS?) or already gone → mark done
+            await self._mark_event_processed(session, evt.id)
+            return
+
+        if row["status"] != "QUEUED":
+            # Nothing to do for non-queued states
+            await self._mark_event_processed(session, evt.id)
+            return
+
+        # ---- Attempt send via provider ----
+        success, wa_id, http_status, error_text = await self._send_via_whatsapp(session, message_id)
+
+        if success:
+            # Transition → SENT and store WA id
             await session.execute(
                 text(
                     """
                     UPDATE messages
-                    SET status = 'FAILED',
-                        status_updated_at = now()
+                    SET status = 'SENT',
+                        whatsapp_message_id = COALESCE(:waid, whatsapp_message_id),
+                        status_updated_at = now(),
+                        retry_count = 0
                     WHERE id = :mid
                     """
                 ),
+                {"mid": message_id, "waid": wa_id},
+            )
+            await self._mark_event_processed(session, evt.id)
+            return
+
+        # Failure path
+        attempts = await self.redis.incr(keys["attempts"])
+        # Treat idempotency conflict like success/no-op: do not spam
+        if http_status == 409:
+            await self._mark_event_processed(session, evt.id)
+            return
+
+        # Retryable?
+        if http_status == 429 or (http_status is None) or (500 <= (http_status or 500) < 600):
+            delay = backoff_seconds(attempts)
+            not_before = _utcnow().timestamp() + delay
+            await self.redis.set(keys["not_before"], str(not_before), ex=int(delay) + 5)
+            # visible counter in DB (optional)
+            await session.execute(
+                text("UPDATE messages SET retry_count = COALESCE(retry_count,0) + 1 WHERE id = :mid"),
                 {"mid": message_id},
             )
-            await mark_event_processed(session, evt["id"])
-            # Push to Redis DLQ for ops visibility
-            await redis.lpush(keys["dlq"], json.dumps({
-                "message_id": message_id,
-                "event_id": evt["id"],
-                "tenant_id": str(evt["tenant_id"]),
-                "reason": f"retry_exhausted:{http_status}",
-                "error": error_text,
-                "ts": _utcnow().isoformat(),
-            }))
-        return
-
-    # Non-retryable 4xx → mark FAILED + DLQ
-    await session.execute(
-        text(
-            """
-            UPDATE messages
-            SET status = 'FAILED',
-                error_code = :ecode,
-                status_updated_at = now(),
-                retry_count = COALESCE(retry_count,0)
-            WHERE id = :mid
-            """
-        ),
-        {"mid": message_id, "ecode": f"http_{http_status}"},
-    )
-    await mark_event_processed(session, evt["id"])
-    await redis.lpush(
-        keys["dlq"],
-        json.dumps(
-            {
-                "message_id": message_id,
-                "event_id": evt["id"],
-                "tenant_id": str(evt["tenant_id"]),
-                "reason": f"non_retryable:{http_status}",
-                "error": error_text,
-                "ts": _utcnow().isoformat(),
-            }
-        ),
-    )
-
-
-async def handle_event(session: AsyncSession, evt: dict) -> None:
-    """
-    Dispatch by aggregate/event type
-    """
-    if evt["aggregate_type"] == "Message" and evt["event_type"] == "MessageChanged":
-        await process_message_changed(session, evt)
-    else:
-        # Unhandled event types: mark processed to avoid pile-up
-        await mark_event_processed(session, evt["id"])
-
-
-# --------------------------
-# Main loop
-# --------------------------
-
-async def run_once() -> int:
-    """
-    Run a single polling iteration. Returns number of events processed/considered.
-    """
-    async with SessionLocal.begin() as session:  # transactional; outbox rows are FOR UPDATE SKIP LOCKED
-        events = await fetch_outbox_batch(session)
-        for evt in events:
-            try:
-                # Each event processing uses its own nested txn boundary via the same session
-                await handle_event(session, evt)
-            except Exception as e:
-                # Last-resort poison event handling:
-                # Do NOT mark as processed; log via Redis DLQ so ops can inspect.
+            if attempts >= MAX_RETRIES:
+                await session.execute(
+                    text(
+                        """
+                        UPDATE messages
+                        SET status = 'FAILED',
+                            status_updated_at = now()
+                        WHERE id = :mid
+                        """
+                    ),
+                    {"mid": message_id},
+                )
+                await self._mark_event_processed(session, evt.id)
                 try:
-                    await redis.lpush(
-                        "dlq:outbox_events",
+                    self.redis.lpush(
+                        keys["dlq"],
                         json.dumps(
                             {
-                                "event_id": evt["id"],
-                                "tenant_id": str(evt.get("tenant_id")),
-                                "reason": f"handler_exception:{e.__class__.__name__}",
+                                "message_id": message_id,
+                                "event_id": evt.id,
+                                "tenant_id": str(tenant_id),
+                                "reason": f"retry_exhausted:{http_status}",
+                                "error": error_text,
                                 "ts": _utcnow().isoformat(),
                             }
                         ),
                     )
                 except Exception:
                     pass
-        return len(events)
+            return
+
+        # Non-retryable 4xx → mark FAILED + DLQ
+        await session.execute(
+            text(
+                """
+                UPDATE messages
+                SET status = 'FAILED',
+                    error_code = :ecode,
+                    status_updated_at = now(),
+                    retry_count = COALESCE(retry_count,0)
+                WHERE id = :mid
+                """
+            ),
+            {"mid": message_id, "ecode": f"http_{http_status}"},
+        )
+        await self._mark_event_processed(session, evt.id)
+        try:
+            self.redis.lpush(
+                keys["dlq"],
+                json.dumps(
+                    {
+                        "message_id": message_id,
+                        "event_id": evt.id,
+                        "tenant_id": str(tenant_id),
+                        "reason": f"non_retryable:{http_status}",
+                        "error": error_text,
+                        "ts": _utcnow().isoformat(),
+                    }
+                ),
+            )
+        except Exception:
+            pass
+
+    # =========================
+    # Provider adapter (WhatsApp Graph API)
+    # =========================
+    async def _send_via_whatsapp(
+        self, session: AsyncSession, message_id: str
+    ) -> Tuple[bool, Optional[str], Optional[int], Optional[str]]:
+        """
+        Actually send message via WhatsApp Graph API.
+        Returns (success, wa_id, http_status, error_text).
+        """
+
+        # Fetch message + channel details
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT m.id, m.to_phone, m.content_jsonb, m.message_type,
+                           c.phone_number_id, c.access_token_ciphertext, c.tenant_id
+                    FROM messages m
+                    JOIN whatsapp_channels c ON m.channel_id = c.id
+                    WHERE m.id = :mid
+                    """
+                ),
+                {"mid": message_id},
+            )
+        ).mappings().first()
+
+        if not row:
+            return False, None, None, "message_not_found"
+
+        # Prepare token (decrypt in real impl; here plaintext for dev)
+        token = row["access_token_ciphertext"]
+
+        # Construct request
+        phone_number_id = row["phone_number_id"]
+        to_phone = row["to_phone"]
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_phone,
+            "type": row["message_type"].lower(),
+            row["message_type"].lower(): row["content_jsonb"],
+        }
+
+        url = f"{WHATSAPP_GRAPH_BASE}/{phone_number_id}/messages"
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+
+            # Structured log of request + response
+            log_entry = {
+                "event": "whatsapp_send",
+                "message_id": message_id,
+                "tenant_id": str(row["tenant_id"]),
+                "channel_phone_id": str(phone_number_id),
+                "to": to_phone,
+                "payload": payload,
+                "status_code": resp.status_code,
+                "resp_text": resp.text,
+            }
+            print(json.dumps(log_entry), flush=True)
+
+            if resp.is_success:
+                wa_id = (
+                    resp.json()
+                    .get("messages", [{}])[0]
+                    .get("id")
+                )
+                return True, wa_id, resp.status_code, None
+            else:
+                return False, None, resp.status_code, resp.text
+
+        except Exception as e:
+            print(
+                json.dumps(
+                    {
+                        "event": "whatsapp_send_exception",
+                        "message_id": message_id,
+                        "error": str(e),
+                    }
+                ),
+                flush=True,
+            )
+            return False, None, None, str(e)
 
 
-async def main():
-    if not DATABASE_URL:
-        print("ERROR: DATABASE_URL is not configured", file=sys.stderr)
-        sys.exit(1)
+# =========================
+# Entrypoint
+# =========================
 
-    print("[outbox-worker] starting …", flush=True)
-    async with lifespan_tasks() as stop_event:
-        while not stop_event.is_set():
-            try:
-                processed = await run_once()
-                if processed == 0:
-                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
-            except Exception as e:
-                # global loop guard; don't crash the worker
-                print(f"[outbox-worker] loop error: {e}", file=sys.stderr)
-                await asyncio.sleep(1.0)
+async def main() -> None:
+    engine = create_async_engine(DB_URL, pool_pre_ping=True)
+    redis = Redis.from_url(REDIS_URL, decode_responses=True)
 
-    print("[outbox-worker] stopping", flush=True)
-    await http.aclose()
-    await redis.close()
-    await engine.dispose()
+    worker = OutboxWorker(engine, redis)
+
+    # Graceful shutdown
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, worker.stop)
+        except NotImplementedError:
+            # Windows
+            pass
+
+    try:
+        await worker.run()
+    finally:
+        try:
+            await redis.aclose()
+        except Exception:
+            pass
+        try:
+            await engine.dispose()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Allow: python -m src.worker.outbox_worker
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

@@ -62,6 +62,7 @@ class ChannelService:
             tenant_id=ch.tenant_id,
             phone_number_id=ch.phone_number_id,
             business_phone=ch.business_phone,
+            webhook_url=ch.webhook_url,
             token=ch.token,
             webhook_token=new_token,
             rate_limit_per_second=ch.rate_limit_per_second,
