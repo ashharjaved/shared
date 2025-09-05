@@ -27,7 +27,7 @@ from src.messaging.api.routes.messages import router as messages_router
 from src.messaging.api.routes.webhook import router as webhook_router
 # Health router (new)
 from src.shared.health import router as health_router
-
+from src.conversation.api import router as conversation_router
 
 class JwtContextMiddleware(BaseHTTPMiddleware):
     """
@@ -90,6 +90,7 @@ def create_app() -> FastAPI:
     app.include_router(channels_router)
     app.include_router(messages_router)
     app.include_router(webhook_router)
+    app.include_router(conversation_router)
 
     # Centralized error handling → {code, message, details?, correlation_id?}
     register_exception_handlers(app)

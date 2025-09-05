@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum, StrEnum
 import re
-from typing import Dict, List, Mapping, MutableMapping, Optional, Union
+from typing import Dict, List, Mapping, Optional, Union
 
 
 # -------------------------

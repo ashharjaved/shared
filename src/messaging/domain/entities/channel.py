@@ -26,7 +26,7 @@ class Channel:
     business_phone: str   # E.164 string (validated via PhoneNumber VO in Message entity)
 
     # Sensitive credentials – never log these; infra must store encrypted-at-rest.
-    token: str = field(repr=False)
+    token: str = field(repr=False) 
     webhook_token: str = field(repr=False)
     webhook_url: str
 

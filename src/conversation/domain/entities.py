@@ -51,7 +51,7 @@ class ConversationSession:
     current_menu_id: Optional[UUID]
     status: SessionStatus
     expires_at: datetime
-    last_activity: datetime
+    last_activity: datetime | None
     message_count: int
     context: Dict[str, JSONValue] = field(default_factory=dict)
 
