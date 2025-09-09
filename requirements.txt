@@ -13,3 +13,5 @@ jwt
 redis 
 aiosqlite
 httpx
+pythonjsonlogger
+structlog

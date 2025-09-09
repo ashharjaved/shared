@@ -1,97 +1,41 @@
 # src/identity/infrastructure/models/tenant_model.py
+"""
+Tenant ORM model.
+"""
 
 from datetime import datetime
-from typing import Optional
 from uuid import UUID
+from sqlalchemy import Column, Index, String, Boolean, DateTime, ForeignKey, Enum, text
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
+from sqlalchemy.orm import relationship
 
-from typing import TYPE_CHECKING
+from src.shared.database.base_model import BaseModel
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, UUID as SQLAlchemy_UUID
-from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.sql import func
 
-from src.identity.domain.entities.tenant import SubscriptionPlan
-from src.shared.database import Base
-from src.identity.domain.entities.tenant import Tenant, TenantType
-
-if TYPE_CHECKING:
-    # Only for type checkers; does NOT run at import time, so no cycle
-    from .user_model import UserModel
-
-class TenantModel(Base):
-    """SQLAlchemy model for tenants table."""
+class TenantModel(BaseModel):
+    """Tenant ORM model with hierarchical support."""
     
-    __tablename__ = "tenants"
+    __tablename__ = "tenant"
     
-    id: Mapped[UUID] = mapped_column(
-        SQLAlchemy_UUID(as_uuid=True),
-        primary_key=True,
-        server_default=func.gen_random_uuid()
-    )
-    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    type: Mapped[TenantType] = mapped_column("tenant_type",
-        PG_ENUM(TenantType, name="tenant_type_enum", create_type=False),
-        nullable=False
-    )
-     
-    parent_tenant_id: Mapped[Optional[UUID]] = mapped_column(
-        SQLAlchemy_UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="RESTRICT"),
-        nullable=True
-    )
-    plan: Mapped[Optional["SubscriptionPlan"]] = mapped_column("subscription_plan",
-        PG_ENUM(SubscriptionPlan, name="subscription_plan_enum", create_type=False),
-        nullable=True
-    )
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+    id = Column(PgUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    parent_id = Column(PgUUID(as_uuid=True), ForeignKey("tenant.id"), nullable=True)
+    name = Column(String(255), nullable=False)
+    slug = Column(String(100), nullable=False, unique=True)
+    tenant_type = Column(
+        Enum("root", "reseller", "tenant", name="tenant_type_enum"), 
         nullable=False,
-        server_default=func.now()
+        server_default="tenant"
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now()
-    )
+    is_active = Column(Boolean, nullable=False, server_default=text("true"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now() at time zone 'utc'"),)
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now() at time zone 'utc'"),server_onupdate=text("now() at time zone 'utc'"))
     
     # Relationships
-    users: Mapped[list["UserModel"]] = relationship(
-        "UserModel",
-        back_populates="tenant",
-    )
-    
+    parent = relationship("TenantModel", remote_side=[id], back_populates="children")
+    children = relationship("TenantModel", back_populates="parent")
+    memberships = relationship("MembershipModel", back_populates="tenant", cascade="all, delete-orphan")
+
     __table_args__ = (
-        Index("idx_tenants_type", "tenant_type"),
-        Index("ix_tenants_parent_tenant_id", "parent_tenant_id"),)
-    
-    def to_domain(self) -> Tenant:
-        """Convert ORM model to domain entity."""
-        return Tenant(
-            id=self.id,
-            name=self.name,
-            type=self.type,
-            parent_tenant_id=self.parent_tenant_id,
-            plan=self.plan,
-            is_active=self.is_active,
-            created_at=self.created_at,
-            updated_at=self.updated_at
-        )
-    
-    @classmethod
-    def from_domain(cls, tenant: Tenant) -> "TenantModel":
-        """Create ORM model from domain entity."""
-        return cls(
-            id=tenant.id,
-            name=tenant.name,
-            type=tenant.type,
-            parent_tenant_id=tenant.parent_tenant_id,
-            plan=tenant.plan,
-            is_active=tenant.is_active,
-            created_at=tenant.created_at,
-            updated_at=tenant.updated_at
-        )
-    
-    def __repr__(self) -> str:
-        return f"<TenantModel(id={self.id}, name='{self.name}', type={self.type})>"
+        Index("ix_tenants_slug", "slug", unique=True),
+        Index("ix_tenants_type", "tenant_type"),
+    )

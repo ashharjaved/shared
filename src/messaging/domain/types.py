@@ -1,7 +1,21 @@
 # src/messaging/domain/types.py
-from typing import Awaitable, Callable, Optional, Tuple
-from uuid import UUID
+"""Type aliases and domain-specific type definitions for messaging domain."""
 
-GetChannelLimits = Callable[[UUID], Awaitable[Tuple[Optional[int], Optional[int]]]]
-GetChannelMessages = Callable[[UUID, int, int], Awaitable[Tuple[Optional[str], Optional[int]]]]
-                           
+from typing import NewType
+from uuid import UUID
+from datetime import datetime
+
+# ID Types
+ChannelId = NewType('ChannelId', UUID)
+MessageId = NewType('MessageId', int)  # bigserial from DB
+OutboxId = NewType('OutboxId', int)    # bigserial from DB
+TenantId = NewType('TenantId', UUID)
+WhatsAppMessageId = NewType('WhatsAppMessageId', str)
+PhoneNumberId = NewType('PhoneNumberId', str)
+MSISDN = NewType('MSISDN', str)  # E.164 format
+
+# Domain primitives
+VerifyToken = NewType('VerifyToken', str)
+AppSecret = NewType('AppSecret', str)
+DedupeKey = NewType('DedupeKey', str)
+ErrorCode = NewType('ErrorCode', str)
