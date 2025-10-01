@@ -28,6 +28,6 @@ class StepExecutor(ABC):
                 "next_step": "next step key or None",
                 "context_updates": {"key": "value"},
                 "actions_performed": [...]
-            }
+            } 
         """
         pass
