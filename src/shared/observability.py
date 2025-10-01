@@ -15,9 +15,9 @@ import asyncio
 from time import perf_counter
 from typing import Any, Dict, Optional
 
-from shared.redis import get_redis
+from shared.cache.redis import get_redis
 
-from .logging import get_logger
+from .structured_logging import get_logger
 
 _log = get_logger("obs")
 

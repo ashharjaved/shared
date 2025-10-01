@@ -1,32 +1,41 @@
 # src/shared/database.py
 """
-Async database configuration, session management, and per-request RLS context.
-Merges engine lifecycle + helpers with verified RLS handling.
+database.py — Async SQLAlchemy engine & session factory (tenant-agnostic)
+
+This module owns:
+  - Creating & caching the global AsyncEngine
+  - Exposing an async session context manager (`get_async_session`)
+  - Safe engine disposal for shutdown hooks and tests
+  - Minimal, *tenant-agnostic* connection/session settings
+
+Important:
+  - Do NOT set tenant GUCs (RLS) here. RLS is applied in rls.py / sessions.py.
+  - Keep this layer infra-only (no domain/app logic).
+
+References:
+  - POLICIES.md → Coding Standards, RLS & GUC Contract
+  - SQLAlchemy 2.x async engine/session patterns
 """
 
 from __future__ import annotations
 
-import time
-import inspect  # <-- add
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator, Dict, Optional, Union, Callable, Awaitable  # <-- ensure these
-from typing import Optional
+from typing import Any, AsyncGenerator, Dict, Optional, Optional  # <-- ensure these
 import sqlalchemy as sa
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool, QueuePool
-import structlog  # type: ignore[import-not-found]
-logger = structlog.get_logger(__name__)
+from sqlalchemy.pool import NullPool
+import structlog
+from src.config import get_settings
 
-from src.shared.config import get_settings
-from src.shared.errors import RlsNotSetError
-from src.shared.utils.tenant_ctxvars import snapshot as ctx_snapshot  # <-- use your helper
+logger = structlog.get_logger(__name__)
 
 # ---- Globals ---------------------------------------------------------------
 
 _engine: Optional[AsyncEngine] = None
 _session_factory: Optional[async_sessionmaker[AsyncSession]] = None
 
+settings = get_settings()
 
 # ---- Engine lifecycle ------------------------------------------------------
 
@@ -38,12 +47,11 @@ async def create_database_engine(database_url: str) -> AsyncEngine:
     settings = get_settings()
 
     # Choose pool strategy
-    if settings.is_testing:
+    if settings.IS_TESTING:
         poolclass = NullPool
         pool_size = 0
         max_overflow = 0
     else:
-        poolclass = QueuePool
         pool_size = settings.database_pool_size
         max_overflow = settings.database_max_overflow
 
@@ -51,7 +59,6 @@ async def create_database_engine(database_url: str) -> AsyncEngine:
         database_url,
         echo=settings.debug and not settings.is_production,
         # echo_pool removed (best controlled via logging config)
-        poolclass=poolclass,
         pool_size=pool_size,
         max_overflow=max_overflow,
         pool_timeout=30,
@@ -59,7 +66,7 @@ async def create_database_engine(database_url: str) -> AsyncEngine:
         pool_pre_ping=True,
         connect_args={
             "server_settings": {
-                "application_name": f"wcp-api-{settings.environment}",
+                "application_name": f"wcp-api-{settings.ENVIRONMENT}",
                 "statement_timeout": "30000",  # 30s
             }
         },
@@ -103,9 +110,29 @@ def get_engine() -> AsyncEngine:
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
-    """Return initialized session factory or raise."""
+    """
+    Return initialized session factory or lazily initialize it.
+
+    Returns:
+        async_sessionmaker[AsyncSession]: Configured session factory for async sessions.
+
+    Raises:
+        RuntimeError: If engine is not initialized and cannot be created.
+    """
+    global _session_factory
     if _session_factory is None:
-        raise RuntimeError("Session factory not initialized. Call create_database_engine first.")
+        # Lazy initialization for compatibility with provided get_session()
+        try:
+            _session_factory = async_sessionmaker(
+                bind=get_engine(),
+                class_=AsyncSession,
+                expire_on_commit=False,
+                autoflush=False,  # Explicit flush control for performance
+            )
+            logger.debug("Session factory lazily initialized")
+        except RuntimeError as e:
+            logger.error("Failed to initialize session factory: engine not ready", error=str(e))
+            raise RuntimeError("Session factory not initialized. Call create_database_engine first.")
     return _session_factory
 
 
@@ -125,236 +152,6 @@ async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
             raise
         finally:
             await session.close()
-
-
-# ---- RLS / Tenant Context --------------------------------------------------
-
-class TenantContext:
-    """
-    Lightweight tenant context to be applied via SET LOCAL for the current txn.
-    """
-    def __init__(
-        self,
-        tenant_id: Optional[str] = None,
-        user_id: Optional[str] = None,
-        roles: Union[str, list[str], None] = None,
-    ):
-        self.tenant_id: Optional[str] = tenant_id
-        self.user_id: Optional[str] = user_id
-        # normalize to list[str]
-        if roles is None:
-            self.roles: list[str] = []
-        elif isinstance(roles, str):
-            self.roles = [r for r in roles.split(",") if r]
-        else:
-            self.roles = list(roles)
-
-    def __repr__(self) -> str:
-        return f"TenantContext(tenant_id={self.tenant_id}, user_id={self.user_id}, roles={self.roles})"
-    
-def tenant_context_from_ctxvars() -> Optional[TenantContext]:
-    """
-    Read ctxvars (set by HTTP middleware) and build a TenantContext.
-    Returns None if no tenant_id is present.
-    """
-    snap = ctx_snapshot()
-    tid = snap.get("tenant_id")
-    if not tid:
-        return None
-    return TenantContext(
-        tenant_id=str(tid),
-        user_id=str(snap.get("user_id") or None),
-        roles=list(snap.get("roles") or []),
-    )
-
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    snap = ctx_snapshot()
-    # Fail fast if tenant missing (403 handler should convert)
-    if not snap.get("tenant_id"):
-        raise RuntimeError("Tenant context not set")  # your exception type here
-
-    ctx = TenantContext(
-        tenant_id=str(snap["tenant_id"]),
-        user_id=str(snap.get("user_id")),
-        roles=",".join(snap.get("roles", [])),
-    )
-
-    async with get_session_with_rls(ctx) as session:
-        # Optional one-time guard per request (cheap)
-        if getattr(settings, "DEBUG_VERIFY_RLS", False):
-            await _verify_rls_context(session)
-        yield session
-
-
-async def _apply_rls_locals(session: AsyncSession, ctx: TenantContext) -> None:
-    """
-    Apply RLS via set_config(..., true) so values are local to the current txn.
-    """
-    try:
-        if ctx.tenant_id:
-            await session.execute(
-                sa.text("SELECT set_config('app.jwt_tenant', :tenant_id, true)"),
-                {"tenant_id": str(ctx.tenant_id)},
-            )
-        if ctx.user_id:
-            await session.execute(
-                sa.text("SELECT set_config('app.user_id', :user_id, true)"),
-                {"user_id": str(ctx.user_id)},
-            )
-        if ctx.roles:
-            roles_csv = ",".join(ctx.roles) if isinstance(ctx.roles, (list, tuple)) else str(ctx.roles)
-            await session.execute(
-                sa.text("SELECT set_config('app.roles', :roles, true)"),
-                {"roles": roles_csv},
-            )
-        logger.debug("RLS context applied", tenant_id=ctx.tenant_id, user_id=ctx.user_id, roles=ctx.roles)
-    except Exception as e:
-        logger.error("Failed to set tenant context", exc_info=str(e))
-        raise RlsNotSetError(f"Failed to set RLS context: {str(e)}")
-
-
-async def _verify_rls_context(session: AsyncSession) -> Dict[str, Optional[str]]:
-    """
-    Read back current GUCs to ensure RLS context is present (best-effort).
-    """
-    try:
-        result = await session.execute(
-            text("""
-                SELECT
-                    current_setting('app.jwt_tenant', true)  AS tenant_id,
-                    current_setting('app.user_id', true)      AS user_id,
-                    current_setting('app.roles', true)        AS roles
-            """)
-        )
-        row = result.fetchone()
-        if not row:
-            raise RlsNotSetError("Unable to retrieve RLS context")
-
-        ctx = {"tenant_id": row.tenant_id, "user_id": row.user_id, "roles": row.roles}
-        if not ctx["tenant_id"]:
-            raise RlsNotSetError("Tenant ID not set in RLS context")
-        return ctx  # tenant may be required; user/roles optional depending on endpoint
-    except Exception as e:
-        logger.error("Failed to verify RLS context", error=str(e))
-        raise RlsNotSetError(f"RLS context verification failed: {str(e)}")
-
-
-@asynccontextmanager
-async def get_session_with_rls(
-    tenant_id: str,
-    user_id: Optional[str] = None,
-    roles: Optional[list[str]] = None,
-) -> AsyncGenerator[AsyncSession, None]:
-    """
-    Session context manager that applies and verifies RLS GUCs for the request.
-    """
-    async with get_async_session() as session:
-        ctx = TenantContext(tenant_id=tenant_id, user_id=user_id, roles=roles or [])
-        # begin a tx scope so SET LOCAL persists for the work you do inside
-        async with session.begin():
-            await _apply_rls_locals(session, ctx)
-            await _verify_rls_context(session)
-            yield session  # keep using this txn or create subtransactions as needed
-
-@asynccontextmanager
-async def with_rls(
-    session: AsyncSession,
-    *,
-    tenant_id: str,
-    user_id: Optional[str] = None,
-    roles: Optional[list[str]] = None,
-) -> AsyncGenerator[AsyncSession, None]:
-    """
-    Context manager to ensure all operations within are executed with tenant RLS.
-    Usage:
-        async with with_rls(session, tenant_id=tid, user_id=uid, roles=csv_roles):
-            await session.execute(...)
-    """
-    # Use SAVEPOINT when nested within existing tx; otherwise rely on outer tx.
-    # We assume caller manages the transaction boundary (no commits here).
-    ctx = TenantContext(tenant_id=tenant_id, user_id=user_id, roles=roles or [])
-    await _apply_rls_locals(session, ctx)
-    try:
-        yield session
-    finally:
-        # No-op: SET LOCAL lives until txn ends. We intentionally do not reset.
-        pass
-
-@asynccontextmanager
-async def session(require_tenant: bool = True) -> AsyncGenerator[AsyncSession, None]:
-    factory = get_session_factory()
-    async with factory() as s:
-        async with s.begin():
-            ctx = TenantContext()  # populate from request contextvars
-            await _apply_rls_locals(s, ctx)
-            await _verify_rls_context(s) if require_tenant else None
-        try:
-            yield s
-        except Exception:
-            await s.rollback()
-            raise
-        finally:
-            await s.close()
-
-# ---- Helpers: transactions & queries --------------------------------------
-
-async def run_in_transaction(
-    operation: Callable[[AsyncSession, Any], Any] | Callable[[AsyncSession, Any], Awaitable[Any]],
-    tenant_context: Optional[TenantContext] = None,
-    *args,
-    **kwargs,
-) -> Any:
-    """
-    Execute a callable/coroutine in a transaction, optionally with RLS context.
-    """
-    start = time.time()
-    try:
-        _ctx = tenant_context or tenant_context_from_ctxvars()
-        async with get_async_session() as session:
-            async with session.begin():
-                if _ctx and _ctx.tenant_id:
-                    await _apply_rls_locals(session, _ctx)
-
-                # Support both async and sync callables
-                if inspect.iscoroutinefunction(operation):
-                    result = await operation(session, *args, **kwargs)
-                else:
-                    result = operation(session, *args, **kwargs)
-
-        logger.debug("Transaction completed", extra={"duration_ms": int((time.time() - start) * 1000)})
-        return result
-    except Exception as e:
-        logger.error("Transaction failed", extra={"error": str(e), "duration_ms": int((time.time() - start) * 1000)})
-        raise
-
-async def execute_query(
-    query: Union[str, sa.sql.Executable],
-    params: Optional[Dict[str, Any]] = None,
-    tenant_context: Optional[TenantContext] = None,
-):
-    """
-    Execute a raw or SQLAlchemy query with optional RLS tenant context.
-    """
-    async def _op(session: AsyncSession):
-        if isinstance(query, str):
-            return await session.execute(sa.text(query), params or {})
-        return await session.execute(query, params or {})
-
-    return await run_in_transaction(_op, tenant_context)
-
-
-async def get_tenant_from_jwt_context() -> Optional[str]:
-    """
-    Convenience helper to read jwt_tenant() if your DB exposes that helper.
-    """
-    try:
-        async with get_async_session() as session:
-            result = await session.execute(sa.text("SELECT jwt_tenant()"))
-            return str(result.scalar_one_or_none() or "")
-    except Exception as e:
-        logger.warning("Could not retrieve tenant from context", exc_info=str(e))
-        return None
-
 
 # ---- Health checks ---------------------------------------------------------
 
@@ -401,16 +198,3 @@ class DatabaseHealthCheck:
         except Exception as e:
             logger.error("RLS functions health check failed", error=str(e))
             return {"healthy": False, "error": str(e)}
-
-
-# ---- FastAPI dependency & app hooks ---------------------------------------
-
-async def get_db_dependency() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency to inject a plain session (no RLS)."""
-    async with get_async_session() as session:
-        yield session
-
-
-# Optional convenience aliases if your app expects these:
-init_database = create_database_engine
-close_database = close_database_engine

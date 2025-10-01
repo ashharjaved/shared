@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 
-from ..errors import ValidationError
+from ..exception import ValidationError
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +19,12 @@ class PasswordHash:
         # Basic validation - should look like a hash
         if len(self.value) < 32:
             raise ValidationError("Password hash appears invalid (too short)")
+        
+    @classmethod
+    def from_hash(cls, hashed_value: str) -> "PasswordHash":
+        if not isinstance(hashed_value, str) or not hashed_value:
+            raise ValueError("invalid_hashed_password")
+        return cls(hashed_value)
     
     def __str__(self) -> str:
         return "[REDACTED]"

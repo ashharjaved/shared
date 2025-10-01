@@ -10,21 +10,30 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """
     Adds strict security headers on every response.
     """
+    
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         response = await call_next(request)
-        # Strict transport & anti-mime sniff
-        response.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Referrer-Policy", "no-referrer")
-        response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        
+        # Security headers
+        security_headers = {
+            "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "Referrer-Policy": "strict-origin-when-cross-origin",
+            "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+            "X-XSS-Protection": "1; mode=block",
+        }
+        
+        for header, value in security_headers.items():
+            response.headers.setdefault(header, value)
+            
         return response
 
 class IpAllowlistMiddleware(BaseHTTPMiddleware):
     """
     Optional allowlist for sensitive admin surfaces or webhooks.
-    Example usage: only allow Meta/WhatsApp ranges on webhook if desired.
     """
+    
     def __init__(self, app, allowlist_cidrs: Optional[Iterable[str]] = None, enabled: bool = False):
         super().__init__(app)
         self.enabled = enabled
@@ -33,7 +42,12 @@ class IpAllowlistMiddleware(BaseHTTPMiddleware):
     def _is_allowed(self, addr: Optional[str]) -> bool:
         if not self.enabled or not self.networks or not addr:
             return True
+        
         try:
+            # Handle X-Forwarded-For headers
+            if "," in addr:
+                addr = addr.split(",")[0].strip()
+                
             ip = ip_address(addr)
             return any(ip in net for net in self.networks)
         except ValueError:
@@ -42,7 +56,13 @@ class IpAllowlistMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         if not self.enabled:
             return await call_next(request)
-        client_ip = request.client.host if request.client else None
+            
+        client_ip = (
+            request.headers.get("X-Forwarded-For") 
+            or (request.client.host if request.client else None)
+        )
+        
         if not self._is_allowed(client_ip):
             return PlainTextResponse("Forbidden", status_code=403)
+            
         return await call_next(request)

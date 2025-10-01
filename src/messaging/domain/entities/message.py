@@ -1,181 +1,115 @@
-# src/messaging/domain/entities/message.py
-"""Message aggregate root."""
+"""Message entity for WhatsApp messages."""
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
+from enum import Enum
+from uuid import UUID
 
-from ..exceptions import ValidationError, InvalidStateTransition
-from ..types import MessageId, TenantId, ChannelId, WhatsAppMessageId, MSISDN
-from ..value_objects import Direction, MessageStatus, Payload
+class MessageDirection(Enum):
+    """Message direction."""
+    INBOUND = "inbound"
+    OUTBOUND = "outbound"
 
 
-@dataclass(slots=True)
+class MessageStatus(Enum):
+    """Message delivery status."""
+    QUEUED = "queued"
+    SENT = "sent"
+    DELIVERED = "delivered"
+    READ = "read"
+    FAILED = "failed"
+    EXPIRED = "expired"
+
+
+class MessageType(Enum):
+    """WhatsApp message type."""
+    TEXT = "text"
+    IMAGE = "image"
+    AUDIO = "audio"
+    VIDEO = "video"
+    DOCUMENT = "document"
+    LOCATION = "location"
+    TEMPLATE = "template"
+    INTERACTIVE = "interactive"
+
+
+@dataclass
 class Message:
-    """Message aggregate root.
-    
-    Represents a WhatsApp message (inbound or outbound) with
-    status tracking and validation rules.
-    """
-    
-    id: MessageId
-    tenant_id: TenantId
-    channel_id: ChannelId
-    wa_message_id: Optional[WhatsAppMessageId]
-    direction: Direction
-    from_msisdn: MSISDN
-    to_msisdn: MSISDN
-    payload: Payload
-    status: MessageStatus
-    error_code: Optional[str]
-    created_at: datetime
+    """WhatsApp message entity."""
+    id: UUID
+    tenant_id: UUID
+    channel_id: UUID
+    direction: MessageDirection
+    message_type: MessageType
+    from_number: str
+    to_number: str
+    content: Optional[str] = None
+    media_url: Optional[str] = None
+    template_id: Optional[UUID] = None
+    template_variables: Optional[Dict[str, str]] = None
+    whatsapp_message_id: Optional[str] = None  # WhatsApp's ID
+    status: MessageStatus = MessageStatus.QUEUED
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    retry_count: int = 0
+    max_retries: int = 12
+    created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    sent_at: Optional[datetime] = None
+    delivered_at: Optional[datetime] = None
+    read_at: Optional[datetime] = None
     
-    def __post_init__(self) -> None:
-        """Validate message invariants on construction.
-        
-        Raises:
-            ValidationError: If message data violates invariants
-            
-        Examples:
-            >>> from uuid import uuid4
-            >>> from datetime import datetime
-            >>> msg = Message(
-            ...     id=MessageId(1),
-            ...     tenant_id=TenantId(uuid4()),
-            ...     channel_id=ChannelId(uuid4()),
-            ...     wa_message_id=WhatsAppMessageId("wamid.123"),
-            ...     direction=Direction.IN,
-            ...     from_msisdn=MSISDN("+1234567890"),
-            ...     to_msisdn=MSISDN("+0987654321"),
-            ...     payload=Payload({"text": "Hello"}),
-            ...     status=MessageStatus.QUEUED,
-            ...     error_code=None,
-            ...     created_at=datetime.now()
-            ... )
-            >>> msg.is_inbound()
-            True
-        """
-        self._validate_msisdn_format()
-        self._validate_inbound_invariants()
-        self._validate_status_error_consistency()
+    def __post_init__(self):
+        """Initialize timestamps."""
+        now = datetime.utcnow()
+        if self.created_at is None:
+            self.created_at = now
+        if self.updated_at is None:
+            self.updated_at = now
     
-    @classmethod
-    def create_inbound(cls, tenant_id: TenantId, channel_id: ChannelId, wa_message_id: WhatsAppMessageId, from_msisdn: MSISDN, to_msisdn: MSISDN, payload: Payload) -> tuple["Message", MessageReceived]:
-        msg = cls(
-            id=MessageId(0),  # Assigned by DB
-            tenant_id=tenant_id,
-            channel_id=channel_id,
-            wa_message_id=wa_message_id,
-            direction=DirectionVO(Direction.IN),
-            from_msisdn=from_msisdn,
-            to_msisdn=to_msisdn,
-            payload=payload,
-            status=MessageStatusVO(MessageStatus.DELIVERED),  # Inbound starts as delivered
-        )
-        event = MessageReceived(message_id=msg.id, tenant_id=msg.tenant_id, occurred_at=msg.created_at)
-        return msg, event
-
-    def _validate_msisdn_format(self) -> None:
-        """Validate MSISDN format."""
-        for msisdn, field in [(self.from_msisdn, "from_msisdn"), 
-                             (self.to_msisdn, "to_msisdn")]:
-            if not msisdn:
-                raise ValidationError(f"{field} cannot be empty")
-            if not msisdn.startswith('+'):
-                raise ValidationError(f"{field} must start with '+'")
-            if len(msisdn) < 8 or len(msisdn) > 15:
-                raise ValidationError(f"{field} must be 8-15 characters")
-    
-    def _validate_inbound_invariants(self) -> None:
-        """Validate inbound message invariants."""
-        if self.direction.is_inbound() and not self.wa_message_id:
-            raise ValidationError("Inbound messages must have wa_message_id")
-
-    def mark_sent(self, wa_message_id: Optional[WhatsAppMessageId] = None) -> 'Message':
-        """
-        Mark message as sent to WhatsApp API.
-        
-        Args:
-            wa_message_id: WhatsApp-assigned message ID (for outbound)
-            
-        Returns:
-            New Message instance with SENT status
-            
-        Raises:
-            InvalidMessageTransition: If current status doesn't allow sent
-        """
-        _validate_transition(MessageStatus.SENT)
-        
-        updates = {"status": MessageStatus.SENT}
-        if wa_message_id and self.direction == Direction.OUTBOUND:
-            updates["wa_message_id"] = wa_message_id
-            
-        return self._replace(**updates)
-
-    def mark_delivered(self) -> 'Message':
-        """
-        Mark message as delivered to recipient.
-        
-        Returns:
-            New Message instance with DELIVERED status
-            
-        Raises:
-            InvalidMessageTransition: If current status doesn't allow delivered
-        """
-        self._validate_transition(MessageStatus.DELIVERED)
-        return self._replace(status=MessageStatus.DELIVERED)
-
-    def mark_read(self) -> 'Message':
-        """
-        Mark message as read by recipient.
-        
-        Returns:
-            New Message instance with READ status
-            
-        Raises:
-            InvalidMessageTransition: If current status doesn't allow read
-        """
-        self._validate_transition(MessageStatus.READ)
-        return self._replace(status=MessageStatus.READ)
-
-    def mark_failed(self, error_code: ErrorCode) -> 'Message':
-        """
-        Mark message as failed with error code.
-        
-        Args:
-            error_code: WhatsApp error code or internal error
-            
-        Returns:
-            New Message instance with FAILED status
-            
-        Raises:
-            ValidationError: If error_code is empty
-        """
-        if not error_code:
-            raise ValidationError("error_code required when marking failed", "error_code")
-        
-        return self._replace(status=MessageStatus.FAILED, error_code=error_code)
-    
-    def is_inbound(self) -> bool:
-        """Check if message is inbound from user."""
-        return self.direction == Direction.INBOUND
-    
-    def is_outbound(self) -> bool:
-        """Check if message is outbound to user."""
-        return self.direction == Direction.OUTBOUND
-    
-    def _is_valid_msisdn(self, msisdn: MSISDN) -> bool:
-        """Basic E.164 format validation."""
+    def can_retry(self) -> bool:
+        """Check if message can be retried."""
         return (
-            isinstance(msisdn, str) and
-            msisdn.startswith('+') and
-            len(msisdn) >= 8 and
-            len(msisdn) <= 15 and
-            msisdn[1:].isdigit()
+            self.direction == MessageDirection.OUTBOUND and
+            self.status == MessageStatus.FAILED and
+            self.retry_count < self.max_retries
         )
     
-    def _replace(self, **changes) -> 'Message':
-        """Create new instance with specified changes."""
-        from dataclasses import replace
-        return replace(self, **changes)
+    def mark_sent(self, whatsapp_id: str) -> None:
+        """Mark message as sent."""
+        self.status = MessageStatus.SENT
+        self.whatsapp_message_id = whatsapp_id
+        self.sent_at = datetime.utcnow()
+        self.updated_at = self.sent_at
+    
+    def mark_delivered(self) -> None:
+        """Mark message as delivered."""
+        self.status = MessageStatus.DELIVERED
+        self.delivered_at = datetime.utcnow()
+        self.updated_at = self.delivered_at
+    
+    def mark_read(self) -> None:
+        """Mark message as read."""
+        self.status = MessageStatus.READ
+        self.read_at = datetime.utcnow()
+        self.updated_at = self.read_at
+    
+    def mark_failed(self, error_code: str, error_message: str) -> None:
+        """Mark message as failed."""
+        self.status = MessageStatus.FAILED
+        self.error_code = error_code
+        self.error_message = error_message
+        self.retry_count += 1
+        self.updated_at = datetime.utcnow()
+    
+    def is_within_session_window(self, last_inbound: datetime) -> bool:
+        """
+        Check if message is within 24-hour session window.
+        Session messages don't require templates.
+        """
+        if self.direction == MessageDirection.INBOUND:
+            return True
+        time_diff = datetime.utcnow() - last_inbound
+        return time_diff.total_seconds() < 24 * 60 * 60  # 24 hours

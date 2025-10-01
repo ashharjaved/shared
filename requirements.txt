@@ -1,4 +1,3 @@
-
 fastapi 
 uvicorn[standard] 
 sqlalchemy[asyncio] 
@@ -15,3 +14,6 @@ aiosqlite
 httpx
 pythonjsonlogger
 structlog
+cryptography
+python-json-logger
+passlib

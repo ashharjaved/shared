@@ -3,31 +3,28 @@
 Base repository with generic CRUD operations and RLS enforcement.
 """
 
-import logging
-from abc import ABC, abstractmethod
-from typing import Protocol, runtime_checkable
-from typing import TypeVar, Generic, Optional, List, Any, Dict, Type, Sequence
+from abc import ABC
+from typing import Mapping, Protocol, Union, runtime_checkable
+from typing import TypeVar, Generic, Optional, List, Any, Type, Sequence
 from sqlalchemy import select, update, delete, func, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError, NoResultFound
 from sqlalchemy.ext.asyncio import AsyncSession
-from src.shared.database.database import TenantContext
+import structlog
+from src.shared.database.types import TenantContext
 from src.shared.utils import tenant_ctxvars as ctxvars
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Mapper as SA_Mapper
 from src.shared.errors import (
+    ErrorCode,
     NotFoundError, 
     ConflictError, 
-    AppError, 
-    RlsNotSetError,
-    ValidationError
-)
+    DomainError, 
+    RlsNotSetError)
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.orm.exc import UnmappedClassError
 from typing import cast, Any
-logger = logging.getLogger(__name__)
-
+logger = structlog.get_logger(__name__)
 
 # ---- Type constraints -------------------------------------------------------
 # We need models that *have* a typed primary key attribute `id`.
@@ -52,27 +49,29 @@ class BaseRepository(Generic[ModelType, EntityType, IdType], ABC):
     clean domain/ORM boundaries through abstract conversion methods.
     """
     
-    def __init__(self, session: AsyncSession, model_class: Type[ModelType], mapper: Mapper[ModelType, EntityType]):
+    def __init__(self, session: AsyncSession, model_class: Type[ModelType], mapper: Mapper[ModelType, EntityType], 
+                 verify_rls_on_call: bool = False):
         self._session = session
         self._model_class = model_class
         self._mapper = mapper
-    
-    # --- internal: build TenantContext from ctxvars ---
-    def _current_ctx(self) -> TenantContext:
-        snap = ctxvars.snapshot()
-        tenant_id = snap.get("tenant_id")
-        if not tenant_id:
-            # keep it explicit so failures are clear at call site
-            raise RlsNotSetError("Tenant context missing in ctxvars (tenant_id)")
-        user_id = snap.get("user_id")
-        roles_list = snap.get("roles") or []
-        roles_csv = ",".join(roles_list) if isinstance(roles_list, list) else str(roles_list)
-        return TenantContext(tenant_id=str(tenant_id), user_id=str(user_id), roles=roles_csv)
+        self._verify_rls_on_call = verify_rls_on_call
+
+    async def _assert_rls(self) -> None:
+        """
+        Very lightweight defense-in-depth: ensure tenant_id GUC is present.
+        Safe no-op if verification SQL fails upstream mapping to DomainError.
+        """
+        if not self._verify_rls_on_call:
+            return
+        # Avoid circular import at module load
+        from src.shared.database.rls import verify_rls_context  # type: ignore
+        await verify_rls_context(self._session)
 
     async def get_by_id(self, id_value: IdType) -> Optional[EntityType]:
         """Get entity by ID with RLS enforcement."""
         
         try:
+            await self._assert_rls()
             stmt = select(self._model_class).where(self._model_class.id == id_value)
             result = await self._session.execute(stmt)
             model = result.scalar_one_or_none()
@@ -82,9 +81,12 @@ class BaseRepository(Generic[ModelType, EntityType, IdType], ABC):
             logger.error("Failed to get by ID", extra={"id": id_value, "error": str(e)})
             raise self._map_error(e)
     
+    
+
     async def get_one(self, **filters) -> Optional[EntityType]:
         """Get single entity by filters with RLS enforcement."""
         try:
+            await self._assert_rls()
             stmt = select(self._model_class)
             for key, value in filters.items():
                 if hasattr(self._model_class, key):
@@ -102,18 +104,26 @@ class BaseRepository(Generic[ModelType, EntityType, IdType], ABC):
         self, 
         limit: int = 100, 
         offset: int = 0, 
+        order_by: Union[None, str, Any, list[Any]] = None,
         **filters
     ) -> List[EntityType]:
         """List entities with pagination and RLS enforcement."""
         try:
+            await self._assert_rls()
             stmt = select(self._model_class)
             
             # Apply filters
             for key, value in filters.items():
-                if hasattr(self._model_class, key):
-                    stmt = stmt.where(getattr(self._model_class, key) == value)
-            
-            # Apply pagination
+                if not hasattr(self._model_class, key):
+                    raise DomainError(message=f"Unknown filter field '{key}'", code=ErrorCode.INVALID_REQUEST)
+                stmt = stmt.where(getattr(self._model_class, key) == value)
+            # Optional ordering for deterministic paging
+            if order_by is not None:
+                if isinstance(order_by, list):
+                    for ob in order_by:
+                        stmt = stmt.order_by(ob if not isinstance(ob, str) else getattr(self._model_class, ob))
+                else:
+                    stmt = stmt.order_by(order_by if not isinstance(order_by, str) else getattr(self._model_class, order_by))
             stmt = stmt.limit(limit).offset(offset)
             
             result = await self._session.execute(stmt)
@@ -128,6 +138,7 @@ class BaseRepository(Generic[ModelType, EntityType, IdType], ABC):
         """Count entities with filters and RLS enforcement."""
         
         try:
+            await self._assert_rls()
             stmt = select(func.count(self._model_class.id))
             
             # Apply filters
@@ -143,12 +154,14 @@ class BaseRepository(Generic[ModelType, EntityType, IdType], ABC):
     
     async def exists(self, **filters) -> bool:
         """Check if entity exists with filters and RLS enforcement."""
+        await self._assert_rls()
         count = await self.count(**filters)
         return count > 0
     
     async def create(self, entity: EntityType) -> EntityType:
         """Create new entity with RLS enforcement."""        
         try:
+            await self._assert_rls()
             model = self._mapper.to_orm(entity)
             self._session.add(model)
             await self._session.flush()
@@ -166,13 +179,14 @@ class BaseRepository(Generic[ModelType, EntityType, IdType], ABC):
         """Insert or update entity on conflict."""
         
         try:
+            await self._assert_rls()
             model = self._mapper.to_orm(entity)
             # Build a dict using SQLAlchemy inspection (no __table__ typing issues)
             try:
                 # Pylance doesn't know inspect(...) is a Mapper, so cast for type safety.
                 mapper = cast(SA_Mapper[Any], sa_inspect(self._model_class))
             except (NoInspectionAvailable, UnmappedClassError) as e:
-                raise AppError(f"Model {self._model_class!r} is not a mapped class: {e}")
+                raise DomainError(f"Model {self._model_class!r} is not a mapped class: {e}",code=ErrorCode.INTERNAL_ERROR) from e
 
             col_names = [c.key for c in mapper.columns]
 
@@ -213,6 +227,7 @@ class BaseRepository(Generic[ModelType, EntityType, IdType], ABC):
     async def update(self, entity: EntityType) -> EntityType:
         """Update existing entity with RLS enforcement."""        
         try:
+            await self._assert_rls()
             model = self._mapper.to_orm(entity)
             merged_model = await self._session.merge(model)
             await self._session.flush()
@@ -231,6 +246,7 @@ class BaseRepository(Generic[ModelType, EntityType, IdType], ABC):
     async def delete(self, id_value: IdType) -> bool:
         """Delete entity by ID with RLS enforcement."""
         try:
+            await self._assert_rls()
             stmt = delete(self._model_class).where(self._model_class.id == id_value)
             result = await self._session.execute(stmt)
             return result.rowcount > 0
@@ -238,14 +254,113 @@ class BaseRepository(Generic[ModelType, EntityType, IdType], ABC):
             logger.error("Failed to delete entity", extra={"id": id_value, "error": str(e)})
             raise self._map_error(e)
           
-    def _map_error(self, error: Exception) -> AppError:
+    def _map_error(self, error: Exception) -> DomainError:
         """Map database errors to domain errors."""
         if isinstance(error, IntegrityError):
             return ConflictError(f"Database constraint violation: {str(error)}")
         elif isinstance(error, NoResultFound):
             return NotFoundError("Requested resource not found")
-        elif isinstance(error, (AppError, RlsNotSetError)):
+        elif isinstance(error, (DomainError, RlsNotSetError)):
             return error  # Pass through domain errors
         else:
             logger.error("Unmapped database error", extra={"error": str(error), "type": type(error)})
-            return AppError(f"Database operation failed: {str(error)}")
+            return DomainError(
+                code=ErrorCode.INTERNAL_ERROR,
+                message=f"Database operation failed: {error!s}")
+        
+    async def update_fields(self, id_value: IdType, **values: Any) -> EntityType:
+        """
+        Efficient in-place update with RETURNING; still RLS-safe and mapped via self._mapper.
+        """
+        await self._assert_rls()
+        stmt = (
+            update(self._model_class)
+            .where(self._model_class.id == id_value)
+            .values(**values)
+            .returning(self._model_class)
+        )
+        result = await self._session.execute(stmt)
+        model = result.scalar_one_or_none()
+        if not model:
+            raise NotFoundError("Requested resource not found")
+        return self._mapper.to_domain(model)
+
+    # --- helpers: SQL function/procedure calls --------------------------------
+    def _build_params(self, *args: Any, **kwargs: Any) -> tuple[str, dict[str, Any]]:
+        """
+        Build a portable placeholder list and a param map for text() statements.
+        Positional args become :p0, :p1, ...; keyword args keep their names.
+        """
+        param_map: dict[str, Any] = {}
+        pos_placeholders: list[str] = []
+        for i, val in enumerate(args):
+            key = f"p{i}"
+            pos_placeholders.append(f":{key}")
+            param_map[key] = val
+        # kwargs override any duplicate keys from args (unlikely but explicit)
+        for k, v in kwargs.items():
+            param_map[k] = v
+        placeholders = ",".join(pos_placeholders + [f":{k}" for k in kwargs.keys()])
+        return placeholders, param_map
+
+    async def call_function_scalar(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        """
+        Execute a SQL function and return a single scalar value.
+        Example: SELECT my_fn(:...);
+        """
+        try:
+            await self._assert_rls()
+            placeholders, params = self._build_params(*args, **kwargs)
+            stmt = text(f"SELECT {name}({placeholders})")
+            result = await self._session.execute(stmt, params)
+            return result.scalar_one_or_none()
+        except Exception as e:
+            raise self._map_error(e)
+
+    async def call_function_rows(self, name: str, *args: Any, **kwargs: Any) -> List[Mapping[str, Any]]:
+        """
+        Execute a SQL function that returns rows (SETOF record/table) and return dicts.
+        Example: SELECT * FROM my_table_fn(:...);
+        """
+        try:
+            await self._assert_rls()
+            placeholders, params = self._build_params(*args, **kwargs)
+            stmt = text(f"SELECT * FROM {name}({placeholders})")
+            result = await self._session.execute(stmt, params)
+            # row mappings -> plain dicts
+            return [dict(row._mapping) for row in result.fetchall()]
+        except Exception as e:
+            raise self._map_error(e)
+
+    async def call_function_entities(self, name: str, *args: Any, **kwargs: Any) -> List[EntityType]:
+        """
+        Execute a SQL function that returns rows shaped exactly like self._model_class
+        and map them into domain entities via the repository's mapper.
+        """
+        try:
+            await self._assert_rls()
+            placeholders, params = self._build_params(*args, **kwargs)
+            # Use from_statement to hydrate ORM models directly
+            stmt = select(self._model_class).from_statement(text(f"SELECT * FROM {name}({placeholders})"))
+            result = await self._session.execute(stmt, params)
+            models = result.scalars().all()
+            return [self._mapper.to_domain(m) for m in models]
+        except Exception as e:
+            raise self._map_error(e)
+
+    async def call_procedure(self, name: str, *args: Any, **kwargs: Any) -> None:
+        """
+        Execute a SQL stored procedure. Procedures don't return a value;
+        any OUT/INOUT results must be fetched by the procedure itself
+        or via subsequent queries.
+        Example: CALL my_proc(:...);
+        """
+        try:
+            await self._assert_rls()
+            placeholders, params = self._build_params(*args, **kwargs)
+            stmt = text(f"CALL {name}({placeholders})")
+            await self._session.execute(stmt, params)
+            # flush only if your proc mutates data you want later in the same tx
+            await self._session.flush()
+        except Exception as e:
+            raise self._map_error(e)

@@ -1,265 +1,156 @@
-"""
-Centralized configuration for the WhatsApp Chatbot Platform (no external deps).
+# src/config.py
 
-- Pure Python (dataclasses + stdlib), no Pydantic.
-- Loads from OS env; optionally parses a .env file if python-dotenv is installed.
-- Strong typing & validation in __post_init__.
-- Immutable singleton via functools.lru_cache.
-- Secrets never logged (masked).
-"""
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Optional, List, Union
 
-from __future__ import annotations
-
-import functools
-import logging
-import os
-import re
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Literal, Optional
-from urllib.parse import urlparse
-
-# ------------------------------------------------------------------------------
-# Optional .env loader (no hard dependency)
-# ------------------------------------------------------------------------------
-def _maybe_load_dotenv(env_path: Path) -> None:
-    try:
-        if env_path.exists():
-            from dotenv import load_dotenv  # type: ignore
-            load_dotenv(dotenv_path=str(env_path), override=False)
-    except Exception:
-        # dotenv not installed or failed; continue with OS env
-        pass
+from pydantic import Field, AnyHttpUrl
+from pydantic_settings import BaseSettings
 
 
-# ------------------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------------------
-def _mask_secret(value: Optional[str]) -> str:
-    if not value:
-        return "<unset>"
-    if len(value) <= 8:
-        return "***"
-    return value[:2] + "…" + value[-2:]
+class Settings(BaseSettings):
+    """
+    Central application settings (Pydantic v2).
 
+    - Aliases match your .env keys:
+      APP_NAME, ENV, JWT_ALG, JWT_EXPIRES_MIN,
+      CONFIG_TTL_SECONDS, BOOTSTRAP_TOKEN, PASSWORD_HASH_SCHEME,
+      LOCKOUT_MAX_FAILED, LOCKOUT_COOLDOWN_MIN
+    - No duplicate field declarations.
+    """
 
-def _get_env_str(key: str, default: Optional[str] = None, required: bool = False) -> Optional[str]:
-    v = os.getenv(key, default)
-    if required and (v is None or str(v).strip() == ""):
-        raise ValueError(f"Missing required env var: {key}")
-    return v
+    # ------------------------------------------------------------------------------------
+    # App / API
+    # ------------------------------------------------------------------------------------
+    PROJECT_NAME: str = Field(default="whatsapp-chatbot-platform", alias="APP_NAME")
+    ENVIRONMENT: str = Field(default="dev", alias="ENV")  # dev|staging|prod
+    API_V1_STR: str = Field(default="/api")
+    PROJECT_VERSION: str = Field(default="1.0.0")
+    LOG_LEVEL: str = Field(default="INFO")
 
+    debug: bool = True 
 
-def _get_env_bool(key: str, default: bool = False) -> bool:
-    v = os.getenv(key)
-    if v is None:
-        return default
-    v = v.strip().lower()
-    return v in {"1", "true", "t", "yes", "y", "on"}
+    # ------------------------------------------------------------------------------------
+    # Database / Redis
+    # ------------------------------------------------------------------------------------
+    DATABASE_URL: str = Field(
+        default="postgresql+asyncpg://postgres:123456@localhost:5432/centralize_api_Stage",
+        description="Async SQLAlchemy URL (postgresql+asyncpg)",
+    )
+    TEST_DATABASE_URL: Optional[str] = Field(default=None)
+    REDIS_URL: Optional[str] = Field(default="redis://localhost:6379/0")
 
+    # ------------------------------------------------------------------------------------
+    # JWT / Auth
+    # ------------------------------------------------------------------------------------
+    JWT_SECRET: str = Field(
+        default="super-long-very-random-secret-change-me-now",
+        description="HS256 secret or RS256 private key (never commit real secrets)",
+    )
+    JWT_ALGORITHM: str = Field(default="HS256", alias="JWT_ALG")  # HS256 | RS256
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=60, alias="JWT_EXPIRES_MIN")
+    REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=7)
 
-def _get_env_int(key: str, default: int) -> int:
-    v = os.getenv(key)
-    if v is None or v.strip() == "":
-        return default
-    try:
-        return int(v)
-    except Exception:
-        raise ValueError(f"Env var {key} must be an integer")
+    # Optional RS256 keys
+    JWT_PRIVATE_KEY: Optional[str] = Field(default=None, description="PEM private key")
+    JWT_PUBLIC_KEY: Optional[str] = Field(default=None, description="PEM public key")
 
+    # ------------------------------------------------------------------------------------
+    # Security / Passwords / Lockout
+    # ------------------------------------------------------------------------------------
+    PASSWORD_HASH_SCHEME: str = Field(default="argon2")  # or bcrypt
+    PASSWORD_MIN_LENGTH: int = Field(default=8)
+    MAX_LOGIN_ATTEMPTS: int = Field(default=5, alias="LOCKOUT_MAX_FAILED")
+    ACCOUNT_LOCKOUT_MINUTES: int = Field(default=15, alias="LOCKOUT_COOLDOWN_MIN")
+    BOOTSTRAP_TOKEN: str = Field(default="change-me-bootstrap")
+    REFRESH_TOKEN_EXPIRE_MINUTES:int = Field(default=15)
+    database_pool_size:int = Field(default=20)
+    database_max_overflow:int = Field(default=10)
 
-def _validate_choice(value: str, *, choices: tuple[str, ...], key: str) -> str:
-    if value not in choices:
-        raise ValueError(f"{key} must be one of {choices}, got {value!r}")
-    return value
+    # ------------------------------------------------------------------------------------
+    # CORS / Web
+    # ------------------------------------------------------------------------------------
+    BACKEND_CORS_ORIGINS: Union[List[str], str] = Field(
+    default_factory=lambda: [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+    ]
+    )
+    BASE_URL: Optional[AnyHttpUrl] = Field(default=None)
 
+    # ------------------------------------------------------------------------------------
+    # Platform / Cache TTLs
+    # ------------------------------------------------------------------------------------
+    CONFIG_TTL_SECONDS: int = Field(default=300)
+    WHATSAPP_VERIFY_TOKEN: str = Field(default="1f2iedKEuDo4BMubbGW1d5uY76", min_length=10)
+    WHATSAPP_APP_SECRET: str = Field(default="1f2iedKEuDo4BMubbGW1d5uY76", min_length=10)
 
-def _validate_url(value: Optional[str], *, key: str, allowed_schemes: tuple[str, ...]) -> Optional[str]:
-    if value in (None, ""):
+    # ------------------------------------------------------------------------------------
+    # Feature Flags / Misc
+    # ------------------------------------------------------------------------------------
+    IS_TESTING: bool = Field(default=False)
+    ENABLE_RATE_LIMITING: bool = Field(default=True)
+    ENABLE_OUTBOX_WORKER: bool = Field(default=True)
+
+    # ------------------------------------------------------------------------------------
+    # Helper properties
+    # ------------------------------------------------------------------------------------
+    @property
+    def is_dev(self) -> bool:
+        return self.ENVIRONMENT.lower() in {"dev", "development", "local"}
+
+    @property
+    def is_staging(self) -> bool:
+        return self.ENVIRONMENT.lower() in {"stage", "staging"}
+
+    @property
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT.lower() == "prod"
+
+    @property
+    def jwt_is_rs256(self) -> bool:
+        return self.JWT_ALGORITHM.upper() == "RS256"
+
+    def cors_origins(self) -> List[str]:
+        if isinstance(self.BACKEND_CORS_ORIGINS, list):
+            return self.BACKEND_CORS_ORIGINS
+        if isinstance(self.BACKEND_CORS_ORIGINS, str):
+            return [o.strip() for o in self.BACKEND_CORS_ORIGINS.split(",") if o.strip()]
+        return []
+
+    @property
+    def effective_database_url(self) -> str:
+        if self.IS_TESTING and self.TEST_DATABASE_URL:
+            return self.TEST_DATABASE_URL
+        return self.DATABASE_URL
+
+    def get_jwt_secret(self) -> str:
+        if self.jwt_is_rs256 and self.JWT_PRIVATE_KEY:
+            return self.JWT_PRIVATE_KEY
+        return self.JWT_SECRET
+
+    def get_jwt_public_key(self) -> Optional[str]:
+        if self.jwt_is_rs256:
+            return self.JWT_PUBLIC_KEY
         return None
-    parsed = urlparse(value)
-    if parsed.scheme not in allowed_schemes or not parsed.netloc:
-        raise ValueError(f"{key} must be a valid URL with scheme in {allowed_schemes}")
-    return value
+
+    # ------------------------------------------------------------------------------------
+    # Pydantic v2 settings config
+    # ------------------------------------------------------------------------------------
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "case_sensitive": True,
+        "populate_by_name": True,   # enable aliases
+        "extra": "ignore",          # don't crash on unrelated env keys
+    }
 
 
-def _validate_postgres_dsn(value: str, *, key: str) -> str:
-    if not value.startswith("postgresql://") and not value.startswith("postgresql+asyncpg://"):
-        raise ValueError(f"{key} must start with postgresql:// or postgresql+asyncpg://")
-    return value
-
-
-# ------------------------------------------------------------------------------
-# Settings dataclass (immutable)
-# ------------------------------------------------------------------------------
-EnvName = Literal["local", "dev", "staging", "prod"]
-JwtAlg = Literal["HS256", "RS256"]
-
-
-@dataclass(frozen=True)
-class Settings:
-    # Environment
-    environment: EnvName = "local"
-    debug: bool = False
-    is_testing: bool = False
-
-    # Database pooling
-    database_pool_size: int = 5
-    database_max_overflow: int = 10
-
-
-    # Core services
-    database_url: str = field(default="")
-    redis_url: Optional[str] = None
-    secret_key: str = field(default="")
-    jwt_algorithm: JwtAlg = "HS256"
-
-    # Security / JWT
-    access_token_exp_minutes: int = 15
-    refresh_token_exp_minutes: int = 60 * 24 * 7  # 7 days
-    auth_oidc_jwks_url: Optional[str] = None  # e.g., Auth0 JWKS (when using OIDC)
-    # Optional local keys for RS256 (non-OIDC path)
-    jwt_public_key: Optional[str] = None
-    jwt_private_key: Optional[str] = None
-
-    # WhatsApp / Provider
-    wa_api_base_url: str = "https://graph.facebook.com/v19.0"
-    wa_app_secret: Optional[str] = None  # for X-Hub-Signature verification
-
-    # Observability
-    log_level: str = "INFO"
-    otel_exporter_otlp_endpoint: Optional[str] = None
-
-    # Paths
-    base_dir: Path = field(default_factory=lambda: Path(__file__).resolve().parent.parent)
-
-    # Derived/computed flags (filled in __post_init__)
-    is_prod: bool = field(init=False)
-    is_staging: bool = field(init=False)
-    is_dev: bool = field(init=False)
-    is_local: bool = field(init=False)
-
-    def __post_init__(self) -> None:
-        # Validate choices
-        object.__setattr__(
-            self, "environment",
-            _validate_choice(self.environment, choices=("local", "dev", "staging", "prod"), key="ENVIRONMENT"),
-        )
-        object.__setattr__(
-            self, "jwt_algorithm",
-            _validate_choice(self.jwt_algorithm, choices=("HS256", "RS256"), key="JWT_ALGORITHM"),
-        )
-
-        # Validate DSNs/URLs
-        object.__setattr__(self, "database_url", _validate_postgres_dsn(self.database_url, key="DATABASE_URL"))
-        if self.redis_url:
-            _validate_url(self.redis_url, key="REDIS_URL", allowed_schemes=("redis", "rediss"))
-
-        _validate_url(self.auth_oidc_jwks_url, key="AUTH_OIDC_JWKS_URL", allowed_schemes=("http", "https"))
-        _validate_url(self.wa_api_base_url, key="WA_API_BASE_URL", allowed_schemes=("http", "https"))
-        _validate_url(self.otel_exporter_otlp_endpoint, key="OTEL_EXPORTER_OTLP_ENDPOINT", allowed_schemes=("http", "https"))
-
-        # Validate secrets
-        if not self.secret_key or not self.secret_key.strip():
-            raise ValueError("SECRET_KEY must be set and non-empty")
-
-        # Validate token expiries
-        if self.access_token_exp_minutes <= 0:
-            raise ValueError("ACCESS_TOKEN_EXP_MINUTES must be > 0")
-        if self.refresh_token_exp_minutes <= self.access_token_exp_minutes:
-            raise ValueError("REFRESH_TOKEN_EXP_MINUTES must be > ACCESS_TOKEN_EXP_MINUTES")
-
-        # Basic sanity for WA app secret (optional)
-        if self.wa_app_secret is not None and len(self.wa_app_secret) < 8:
-            raise ValueError("WA_APP_SECRET looks too short")
-
-        # RS256 configuration matrix:
-        # - If RS256 is selected:
-        #   - Either OIDC JWKS URL must be set, OR a local public key must be provided.
-        #   - If both JWKS and local keys are provided, fail fast to avoid ambiguity.
-        if self.jwt_algorithm == "RS256":
-            has_jwks = bool(self.auth_oidc_jwks_url)
-            has_local_pub = bool(self.jwt_public_key and self.jwt_public_key.strip())
-            if has_jwks and has_local_pub:
-                raise ValueError("Provide either AUTH_OIDC_JWKS_URL or JWT_PUBLIC_KEY (not both) for RS256")
-            if not (has_jwks or has_local_pub):
-                raise ValueError("For RS256, set AUTH_OIDC_JWKS_URL or provide JWT_PUBLIC_KEY")
-
-        # Log level basic check
-        if not re.fullmatch(r"(?i)DEBUG|INFO|WARNING|ERROR|CRITICAL", self.log_level.strip()):
-            raise ValueError("LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL")
-
-        # Derived flags
-        env = self.environment
-        object.__setattr__(self, "is_prod", env == "prod")
-        object.__setattr__(self, "is_staging", env == "staging")
-        object.__setattr__(self, "is_dev", env == "dev")
-        object.__setattr__(self, "is_local", env == "local")
-
-    # Safe dict (for debug prints without secrets)
-    def safe_dict(self) -> dict:
-        return {
-            "environment": self.environment,
-            "debug": self.debug,
-            "is_testing": self.is_testing,
-            "database_url": "<masked>" if self.database_url else "<unset>",
-            "redis_url": "<masked>" if self.redis_url else "<unset>",
-            "secret_key": _mask_secret(self.secret_key),
-            "jwt_algorithm": self.jwt_algorithm,
-            "access_token_exp_minutes": self.access_token_exp_minutes,
-            "refresh_token_exp_minutes": self.refresh_token_exp_minutes,
-            "auth_oidc_jwks_url": self.auth_oidc_jwks_url or "<unset>",
-            "jwt_public_key": "<masked>" if self.jwt_public_key else "<unset>",
-            "jwt_private_key": "<masked>" if self.jwt_private_key else "<unset>",
-            "wa_api_base_url": self.wa_api_base_url,
-            "wa_app_secret": _mask_secret(self.wa_app_secret),
-            "log_level": self.log_level,
-            "database_pool_size": self.database_pool_size,
-            "database_max_overflow": self.database_max_overflow,
-            "otel_exporter_otlp_endpoint": self.otel_exporter_otlp_endpoint or "<unset>",
-            "base_dir": str(self.base_dir),
-        }
-
-
-# ------------------------------------------------------------------------------
-# Loader (singleton)
-# ------------------------------------------------------------------------------
-_logger = logging.getLogger(__name__)
-
-from typing import cast
-
-@functools.lru_cache(maxsize=1)
+@lru_cache()
 def get_settings() -> Settings:
-    # Attempt to load .env from repo root (../.env relative to src/)
-    env_file = Path(__file__).resolve().parent.parent / ".env"
-    _maybe_load_dotenv(env_file)
+    return Settings()
 
-    settings = Settings(
-        environment=cast(EnvName, _get_env_str("ENVIRONMENT", "local") or "local"),
-        debug=_get_env_bool("DEBUG", False),
-        is_testing=_get_env_bool("IS_TESTING", False),
-        database_url=_get_env_str("DATABASE_URL", required=True) or "",
-        redis_url=_get_env_str("REDIS_URL", None),
-        secret_key=_get_env_str("SECRET_KEY", required=True) or "",
-        jwt_algorithm=cast(JwtAlg, _get_env_str("JWT_ALGORITHM", "HS256") or "HS256"),
-        access_token_exp_minutes=_get_env_int("ACCESS_TOKEN_EXP_MINUTES", 15),
-        refresh_token_exp_minutes=_get_env_int("REFRESH_TOKEN_EXP_MINUTES", 60 * 24 * 7),
-        auth_oidc_jwks_url=_get_env_str("AUTH_OIDC_JWKS_URL", None),
-        jwt_public_key=_get_env_str("JWT_PUBLIC_KEY", None),
-        jwt_private_key=_get_env_str("JWT_PRIVATE_KEY", None),
-        wa_api_base_url=_get_env_str("WA_API_BASE_URL", "https://graph.facebook.com/v19.0") or "https://graph.facebook.com/v19.0",
-        wa_app_secret=_get_env_str("WA_APP_SECRET", None),
-        log_level=_get_env_str("LOG_LEVEL", "INFO") or "INFO",
-        otel_exporter_otlp_endpoint=_get_env_str("OTEL_EXPORTER_OTLP_ENDPOINT", None),
-        database_pool_size=_get_env_int("DATABASE_POOL_SIZE", 5),
-        database_max_overflow=_get_env_int("DATABASE_MAX_OVERFLOW", 10),
-    )
 
-    _logger.info(
-        "Settings loaded",
-        extra={"settings": settings.safe_dict()}
-    )
-    return settings
-
-# Convenience module-level singleton
+# Convenient singleton: from src.config import settings
 settings = get_settings()

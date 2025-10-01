@@ -5,11 +5,11 @@ import re
 from dataclasses import dataclass
 from typing import Self
 
-from ..errors import ValidationError
+from ..exception import ValidationError
 
 
 @dataclass(frozen=True, slots=True)
-class Phone:
+class PhoneNumber:
     """E.164 formatted phone number value object."""
     
     value: str

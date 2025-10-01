@@ -5,7 +5,7 @@
 import re
 from dataclasses import dataclass
 
-from ..errors import ValidationError
+from ..exception import ValidationError
 
 
 @dataclass(frozen=True, slots=True)

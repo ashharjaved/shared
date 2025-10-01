@@ -2,6 +2,7 @@
 from __future__ import annotations
 from typing import Dict, Optional, List
 import contextvars
+from src.shared.database.types import TenantContext as DbTenantContext
 
 # Context variables, set once per request by middleware
 
@@ -53,3 +54,27 @@ def get_request_context() -> Dict[str, object]:
         "user_id": get_user_id() or "",
         "roles": get_roles(),
     }
+
+# -------------------------------------------------------------------
+# Context manager for temporary binding
+# -------------------------------------------------------------------
+from contextlib import contextmanager
+
+@contextmanager
+def bind_tenant_ctx(ctx: DbTenantContext):
+    """
+    Temporarily bind tenant context into ctxvars for the current request/task.
+    Example:
+        ctx = DbTenantContext(tenant_id="...", user_id=None, roles=["SYSTEM"])
+        with bind_tenant_ctx(ctx):
+            await some_service()  # UoW will see tenant_id
+    """
+    tokens = []
+    try:
+        tokens.append(TENANT_ID_VAR.set(ctx.tenant_id))
+        tokens.append(USER_ID_VAR.set(ctx.user_id))
+        tokens.append(ROLES_VAR.set(ctx.roles))
+        yield
+    finally:
+        for tok in reversed(tokens):
+            tok.var.reset(tok)

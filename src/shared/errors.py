@@ -4,7 +4,10 @@
 import uuid
 from typing import Any, Dict, Optional, List
 from enum import Enum
+from typing import Optional
 
+from enum import Enum
+from typing import Dict
 
 class ErrorCode(str, Enum):
     """Standard error codes for API responses."""
@@ -19,7 +22,7 @@ class ErrorCode(str, Enum):
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     INVALID_REQUEST = "invalid_request"
     RATE_LIMITED = "rate_limited"
-    
+    EXTERNAL_ERROR = "external_error"
     # 5xx Server Errors  
     INTERNAL_ERROR = "internal_error"
     SERVICE_UNAVAILABLE = "service_unavailable"
@@ -35,6 +38,30 @@ class ErrorCode(str, Enum):
     BUSINESS_RULE_VIOLATION = "business_rule_violation"
     PROVIDER_ERROR = "provider_error"
 
+ERROR_CODES: Dict[ErrorCode, Dict[str, str | int]] = {
+    ErrorCode.VALIDATION_ERROR: {"http": 422, "code": "validation_error"},
+    ErrorCode.UNAUTHORIZED: {"http": 401, "code": "unauthorized"},
+    ErrorCode.INVALID_CREDENTIALS: {"http": 401, "code": "invalid_credentials"},
+    ErrorCode.FORBIDDEN: {"http": 403, "code": "forbidden"},
+    ErrorCode.NOT_FOUND: {"http": 404, "code": "not_found"},
+    ErrorCode.CONFLICT: {"http": 409, "code": "conflict"},
+    ErrorCode.IDEMPOTENCY_CONFLICT: {"http": 409, "code": "idempotency_conflict"},
+    ErrorCode.INVALID_REQUEST: {"http": 422, "code": "invalid_request"},
+    ErrorCode.RATE_LIMITED: {"http": 429, "code": "rate_limited"},
+    ErrorCode.EXTERNAL_ERROR: {"http": 502, "code": "external_error"},
+    ErrorCode.INTERNAL_ERROR: {"http": 500, "code": "internal_error"},
+    ErrorCode.SERVICE_UNAVAILABLE: {"http": 503, "code": "service_unavailable"},
+    ErrorCode.TIMEOUT_ERROR: {"http": 504, "code": "timeout_error"},
+    ErrorCode.RLS_NOT_SET: {"http": 403, "code": "rls_not_set"},
+    ErrorCode.TENANT_LIMIT_EXCEEDED: {"http": 403, "code": "tenant_limit_exceeded"},
+    ErrorCode.SUBSCRIPTION_EXPIRED: {"http": 403, "code": "subscription_expired"},
+    ErrorCode.INVALID_TOKEN: {"http": 401, "code": "invalid_token"},
+    ErrorCode.TOKEN_EXPIRED: {"http": 401, "code": "token_expired"},
+    ErrorCode.REFRESH_TOKEN_REUSED: {"http": 401, "code": "refresh_token_reused"},
+    ErrorCode.BUSINESS_RULE_VIOLATION: {"http": 422, "code": "business_rule_violation"},
+    ErrorCode.PROVIDER_ERROR: {"http": 502, "code": "provider_error"},
+}
+
 class DomainError(Exception):
     """Base exception for all domain errors."""
     
@@ -46,6 +73,7 @@ class DomainError(Exception):
         correlation_id: Optional[str] = None,
         tenant_id: Optional[uuid.UUID] = None,
         user_id: Optional[uuid.UUID] = None,
+        http_status: int = 500
     ):
         super().__init__(message)
         self.message = message
@@ -54,7 +82,17 @@ class DomainError(Exception):
         self.correlation_id = correlation_id
         self.tenant_id = tenant_id
         self.user_id = user_id
-    
+        self.http_status = http_status
+
+    def to_payload(self, correlation_id: Optional[str] = None) -> Dict[str, Any]:
+        payload = {
+            "code": self.code.value,  # Use .value to get the string value of the enum
+            "message": self.message,
+        }
+        if correlation_id:
+            payload["correlation_id"] = correlation_id
+        return payload
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert exception to dictionary for API response."""
         result = {
@@ -63,7 +101,7 @@ class DomainError(Exception):
         }
         
         if self.details:
-            result["details"] = self.details
+            result["details"] = str(self.details)
         if self.correlation_id:
             result["correlation_id"] = self.correlation_id
             
@@ -375,7 +413,7 @@ class ProviderError(DomainError):
         if provider_message:
             details["provider_message"] = provider_message
         if retry_after:
-            details["retry_after"] = retry_after
+            details["retry_after"] = str(retry_after)
             
         super().__init__(
             message,
@@ -383,6 +421,15 @@ class ProviderError(DomainError):
             details=details,
             **kwargs
         )
+
+class ExternalError(DomainError):
+    """
+    Error for failures caused by external systems (e.g., WhatsApp API, Redis, SMTP).
+    Unlike other errors, this does not require multiple params.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(code=ErrorCode.EXTERNAL_ERROR, message=message)
 
 
 class TimeoutError(DomainError):

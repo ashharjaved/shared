@@ -4,8 +4,8 @@ from typing import Any, Dict
 from sqlalchemy import text
 import structlog
 
-from src.shared.database.engine import get_engine, get_session_factory
-from src.shared.database.sessions import get_async_session
+from src.shared.database import get_engine, get_session_factory
+from src.shared.database.database import get_async_session
 
 logger = structlog.get_logger(__name__)
 

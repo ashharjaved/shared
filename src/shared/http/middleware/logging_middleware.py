@@ -5,36 +5,53 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import Response
 
-from src.shared.logging import get_logger, bind_request_context, set_correlation_id
+from src.shared.structured_logging import get_logger, bind_request_context
 
-log = get_logger("http")
+logger = get_logger("http")
 
 class LoggingMiddleware(BaseHTTPMiddleware):
     """
     Structured access logs + lightweight audit hooks.
-    - Logs start & end with latency, method, path, status.
-    - Context (request_id/tenant_id/user_id) is already bound by ContextMiddleware.
+    Logs start & end with latency, method, path, status.
     """
+    
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        start = time.perf_counter()
-        # best-effort: bind basic request info (path/method) without leaking PII
-        cid = request.headers.get("x-correlation-id")
-        set_correlation_id(cid)
+        start_time = time.perf_counter()
+        
+        # Bind basic request info
         bind_request_context(
-                path=request.url.path,
-                method=request.method,
-                client_ip=request.client.host if request.client else None,
-            )        
+            path=request.url.path,
+            method=request.method,
+            client_ip=request.client.host if request.client else None,
+        )
+        
         try:
             response = await call_next(request)
-            return response
-        finally:
-            dur_ms = round((time.perf_counter() - start) * 1000.0, 2)
-            status = getattr(request.state, "response_status", None)  # optional
-            log.info(
+            duration_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+            
+            # Log successful request
+            logger.info(
                 "http_access",
                 method=request.method,
                 path=request.url.path,
-                status_code=status or getattr(request, "status_code", None),
-                duration_ms=dur_ms,
+                status_code=response.status_code,
+                duration_ms=duration_ms,
+                client_ip=request.client.host if request.client else None,
             )
+            
+            return response
+            
+        except Exception as e:
+            duration_ms = round((time.perf_counter() - start_time) * 1000.0, 2)
+            
+            # Log failed request
+            logger.error(
+                "http_error",
+                method=request.method,
+                path=request.url.path,
+                duration_ms=duration_ms,
+                client_ip=request.client.host if request.client else None,
+                error=str(e),
+            )
+            
+            raise

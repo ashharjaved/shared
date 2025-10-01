@@ -8,7 +8,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
-from src.shared.database.sessions import get_async_session
+from src.shared.database.database import get_async_session
 from src.shared.database.types import TenantContext
 from src.shared.database.rls import apply_rls_locals, tenant_context_from_ctxvars
 

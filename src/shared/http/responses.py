@@ -27,6 +27,6 @@ def created(data: Any, location: Optional[str] = None) -> JSONResponse:
 def no_content() -> Response:
     return Response(status_code=204)
 
-def error_response(err: AppError, correlation_id: Optional[str]) -> JSONResponse:
-    payload = err.to_payload(correlation_id=correlation_id)
+def error_response(err: DomainError, correlation_id: Optional[str]) -> JSONResponse:
+    payload = err.to_payload(correlation_id=correlation_id or "")
     return JSONResponse({"error": payload}, status_code=err.http_status)

@@ -2,19 +2,19 @@
 """Subscription lifecycle rules domain service."""
 
 from ..types import SubscriptionStatus
-from ..errors import ValidationError
+from ..exception import ValidationError
 
 class SubscriptionRules:
     """Business rules for subscription lifecycle transitions."""
     
     # Valid state transitions
     VALID_TRANSITIONS: dict[SubscriptionStatus, set[SubscriptionStatus]] = {
-        'trial': {'active', 'past_due', 'cancelled', 'expired'},
-        'active': {'past_due', 'cancelled', 'expired'},
-        'past_due': {'active', 'cancelled', 'expired'},
-        'cancelled': set(),  # Terminal state
-        'expired': set(),    # Terminal state
-    }
+    SubscriptionStatus.TRIAL: {SubscriptionStatus.ACTIVE, SubscriptionStatus.PAST_DUE, SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED},
+    SubscriptionStatus.ACTIVE: {SubscriptionStatus.PAST_DUE, SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED},
+    SubscriptionStatus.PAST_DUE: {SubscriptionStatus.ACTIVE, SubscriptionStatus.CANCELLED, SubscriptionStatus.EXPIRED},
+    SubscriptionStatus.CANCELLED: set(),
+    SubscriptionStatus.EXPIRED: set(),
+}
     
     @classmethod
     def can_transition_to(

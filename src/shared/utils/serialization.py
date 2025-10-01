@@ -8,8 +8,11 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Dict, Mapping
 from uuid import UUID
+
+from src.conversation.domain.types import JSONValue
+from src.shared.errors import ValidationError
 
 class SafeEncoder(json.JSONEncoder):
     def default(self, o: Any):
@@ -26,3 +29,18 @@ def dumps(data: Any) -> str:
 
 def loads(s: str) -> Any:
     return json.loads(s)
+
+def convert_to_jsonvalue(data: Any) -> JSONValue:
+    """Recursively convert a value to a JSONValue-compatible type."""
+    if isinstance(data, (str, int, float, bool, type(None))):
+        return data
+    elif isinstance(data, list):
+        return [convert_to_jsonvalue(item) for item in data]
+    elif isinstance(data, dict):
+        return {key: convert_to_jsonvalue(value) for key, value in data.items()}
+    else:
+        raise ValidationError(f"Value {data} is not JSON-serializable")
+
+def ensure_jsonvalue_context(context: Mapping[str, Any]) -> Dict[str, JSONValue]:
+    """Convert a Mapping[str, Any] to Dict[str, JSONValue]."""
+    return {key: convert_to_jsonvalue(value) for key, value in context.items()}

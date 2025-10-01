@@ -1,26 +1,36 @@
 from __future__ import annotations
+import uuid
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
 
-from src.shared.logging import get_logger
+from src.shared.structured_logging import get_logger
 from src.shared.http.responses import error_response
-from src.shared.errors import DomainError, ExternalServiceError  # your standardized exceptions
+from src.shared.errors import DomainError, ErrorCode
+
+logger = get_logger("http")
 
 class ExceptionMiddleware(BaseHTTPMiddleware):
     """
     Centralized error translation to the platform's error contract.
     Never leaks stack traces; always returns {code, message, details} JSON.
     """
+    
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        log = get_logger("http")
-        request_id = getattr(request.state, "request_id", None)
+        request_id = (
+            getattr(request.state, "request_id", None) 
+            or request.headers.get("X-Request-Id") 
+            or str(uuid.uuid4())
+        )
+        
+        if not hasattr(request.state, "request_id"):
+            request.state.request_id = request_id
+
         try:
             return await call_next(request)
         except DomainError as ae:
-            # Domain/expected errors — warn, with structured context
-            log.warning(
+            logger.warning(
                 "app_error",
                 code=ae.code,
                 message=ae.message,
@@ -28,8 +38,15 @@ class ExceptionMiddleware(BaseHTTPMiddleware):
                 request_id=request_id,
             )
             return error_response(ae, correlation_id=request_id)
-        except Exception:
-            # Unexpected — log full exception but return generic 500 to client
-            log.exception("unhandled_exception", request_id=request_id)
-            err = ExternalServiceError(message="Internal error")
+        except Exception as e:
+            logger.exception(
+                "unhandled_exception", 
+                exc_info=e, 
+                request_id=request_id
+            )
+            err = DomainError(
+                code=ErrorCode.INTERNAL_ERROR, 
+                message="Internal error", 
+                http_status=500
+            )
             return error_response(err, correlation_id=request_id)
