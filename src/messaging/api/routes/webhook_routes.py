@@ -8,7 +8,7 @@ import json
 from src.messaging.api.schemas.webhook_dto import WebhookVerificationRequest, WebhookPayload
 from src.messaging.application.services.webhook_service import WebhookService
 from src.messaging.infrastructure.dependencies import get_webhook_service
-from src.shared.api.errors import error_response
+from src.shared_.api.errors import error_response
 
 logger = logging.getLogger(__name__)
 

@@ -17,7 +17,7 @@ from src.identity.domain.events.auth_events import (
 )
 from src.identity.application.services.login_rate_limiter import LoginRateLimiter
 #from src.shared.events.event_bus import EventBus
-from src.shared.exceptions import AuthenticationError, AuthorizationError
+from src.shared_.exceptions import AuthenticationError, AuthorizationError
 
 import structlog
 

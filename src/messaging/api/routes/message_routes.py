@@ -15,13 +15,13 @@ from src.messaging.api.schemas.message_dto import (
 )
 from src.messaging.application.services.message_service import MessageService
 from src.messaging.infrastructure.dependencies import get_message_service
-from src.shared.api.dependencies import (
+from src.shared_.api.dependencies import (
     get_current_user,
     check_permission,
     ensure_idempotency
 )
-from src.shared.api.errors import ErrorResponse, error_response
-from src.shared.domain.auth import User, Permission
+from src.shared_.api.errors import ErrorResponse, error_response
+from src.shared_.domain.auth import User, Permission
 
 logger = logging.getLogger(__name__)
 

@@ -9,10 +9,10 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.shared.database.uow import AsyncUoW
-from src.shared.exceptions import AuthorizationError, DomainConflictError, NotFoundError
-from src.shared.error_codes import ERROR_CODES
-from src.shared.structured_logging import log_event
+from src.shared_.database.uow import AsyncUoW
+from src.shared_.exceptions import AuthorizationError, DomainConflictError, NotFoundError
+from src.shared_.error_codes import ERROR_CODES
+from src.shared_.structured_logging import log_event
 from src.identity.domain.services.rbac_policy import Role
 from src.identity.domain.entities.tenant import Tenant, TenantType, SubscriptionPlan
 

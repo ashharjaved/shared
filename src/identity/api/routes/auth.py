@@ -14,13 +14,13 @@ from src.identity.api.schemas import (
 from src.identity.application.services.auth_application_service import (
     AuthApplicationService,
 )
-from src.shared.exceptions import (
+from src.shared_.exceptions import (
     AuthenticationError,
     AuthorizationError,
     ValidationError,
 )
-from src.shared.http.dependencies import get_current_user
-from src.shared.http.errors import _http, _payload, ErrorCode
+from src.shared_.http.dependencies import get_current_user
+from src.shared_.http.errors import _http, _payload, ErrorCode
 
 import structlog
 

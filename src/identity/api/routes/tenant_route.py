@@ -4,13 +4,13 @@ from __future__ import annotations
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from src.shared.database.database import get_session_factory
+from src.shared_.database.database import get_session_factory
 from src.identity.application.factories import make_tenant_service, make_user_service
-from src.shared.security.passwords.factory import build_password_hasher
+from src.shared_.security.passwords.factory import build_password_hasher
 from src.identity.domain.services.rbac_policy import Role
 from src.identity.api.schemas import TenantCreate, TenantRead, TenantStatusUpdate
 from src.identity.application.services.tenant_service import TenantService
-from src.shared.http.dependencies import get_current_user, require_role
+from src.shared_.http.dependencies import get_current_user, require_role
 
 router = APIRouter(prefix="/api/identity/tenants", tags=["Identity:Tenants"])
 

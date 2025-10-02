@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import CITEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
-from src.shared.database.base_model import BaseModel
+from src.shared_.database.base_model import BaseModel
 
 from src.identity.domain.value_objects.role import Role
 

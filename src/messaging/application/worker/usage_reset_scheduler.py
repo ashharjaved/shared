@@ -6,7 +6,7 @@ from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore
 from apscheduler.triggers.cron import CronTrigger  # type: ignore
 from src.messaging.application.services.channel_service import ChannelService
-from src.shared.database import get_async_session
+from src.shared_.database import get_async_session
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)

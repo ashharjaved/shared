@@ -7,7 +7,7 @@ from typing import List
 
 from src.messaging.application.services.template_service import TemplateService
 from src.messaging.domain.entities.template import TemplateStatus
-from src.shared.database import get_async_session
+from src.shared_.database import get_async_session
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)

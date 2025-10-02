@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
 
-from src.shared.domain.entity import Entity
+from src.shared_.domain.entity import Entity
 from src.conversation.domain.value_objects import FlowStatus, FlowVersion
 from src.conversation.domain.entities.flow_step import FlowStep
 

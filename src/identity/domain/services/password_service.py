@@ -1,5 +1,5 @@
 # src/identity/domain/services/password_service.py
-from src.shared.security.passwords.ports import PasswordHasherPort
+from src.shared_.security.passwords.ports import PasswordHasherPort
 from src.identity.domain.value_objects.password_hash import PasswordHash 
 from ..exception import ValidationError
 

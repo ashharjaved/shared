@@ -4,14 +4,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import Any
 
-from src.shared.security.passwords.factory import build_password_hasher
+from src.shared_.security.passwords.factory import build_password_hasher
 from src.identity.domain.services.rbac_policy import Role
 from src.identity.api.schemas import UserCreate, UserRead
 from src.identity.application.services.user_service import UserService
 from src.identity.application.factories import make_user_service  # UoW-aware
-from src.shared.http.dependencies import get_current_user, require_role
-from src.shared.exceptions import NotFoundError, AuthorizationError, DomainConflictError
-from src.shared.database.database import get_session_factory
+from src.shared_.http.dependencies import get_current_user, require_role
+from src.shared_.exceptions import NotFoundError, AuthorizationError, DomainConflictError
+from src.shared_.database.database import get_session_factory
 
 router = APIRouter(prefix="/api/identity/users", tags=["Identity:Users"])
 

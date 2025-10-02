@@ -3,8 +3,8 @@
 from datetime import timedelta
 from typing import Optional
 
-from src.shared.cache.redis import RedisClient
-from src.shared.exceptions import AuthorizationError
+from src.shared_.cache.redis import RedisClient
+from src.shared_.exceptions import AuthorizationError
 
 import structlog
 

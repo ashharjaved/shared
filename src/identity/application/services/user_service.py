@@ -12,17 +12,17 @@ from src.identity.domain.repositories.user_repository import UserRepository
 from src.identity.domain.repositories.tenant_repository import TenantRepository
 from src.identity.domain.services.rbac_policy import Role, RbacPolicy
 
-from src.shared.database.uow import AsyncUoW
-from src.shared.database.types import TenantContext
-from src.shared.error_codes import ERROR_CODES
-from src.shared.exceptions import (
+from src.shared_.database.uow import AsyncUoW
+from src.shared_.database.types import TenantContext
+from src.shared_.error_codes import ERROR_CODES
+from src.shared_.exceptions import (
     AuthorizationError,
     UnauthorizedError,
     DomainConflictError,
     NotFoundError,
 )
-from src.shared.structured_logging import log_event
-from src.shared.security.passwords.ports import PasswordHasherPort
+from src.shared_.structured_logging import log_event
+from src.shared_.security.passwords.ports import PasswordHasherPort
 
 
 @dataclass(slots=True)

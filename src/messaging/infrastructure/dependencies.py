@@ -5,7 +5,7 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 import redis.asyncio as redis
 
-from src.shared.database.deps import get_tenant_scoped_db
+from src.shared_.database.deps import get_tenant_scoped_db
 from src.messaging.infrastructure.adapters.whatsapp_adapter import WhatsAppAPIAdapter
 from src.messaging.infrastructure.adapters.encryption_adapter import EncryptionAdapter
 from src.messaging.infrastructure.adapters.google_speech_adapter import GoogleSpeechAdapter

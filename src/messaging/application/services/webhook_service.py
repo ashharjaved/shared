@@ -14,7 +14,7 @@ from src.messaging.domain.value_objects.webhook_payload import (
 from src.messaging.domain.events.message_events import MessageReceived, MessageDelivered
 from src.messaging.domain.interfaces.repositories import MessageRepository, ChannelRepository
 from src.messaging.domain.interfaces.external_services import WhatsAppClient, SpeechToTextClient
-from src.shared.infrastructure.cache import RedisCache
+from src.shared_.infrastructure.cache import RedisCache
 #from src.shared.infrastructure.events import EventBus
 from src.messaging.domain.events.base_event import DomainEvent
 logger = logging.getLogger(__name__)

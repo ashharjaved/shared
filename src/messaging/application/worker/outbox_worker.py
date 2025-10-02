@@ -12,7 +12,7 @@ from src.messaging.infrastructure.outbox.outbox_service import OutboxService
 from src.messaging.application.services.message_service import MessageService
 from src.messaging.infrastructure.middleware.tenant_context import TenantContextManager
 #from src.shared.infrastructure.database import get_session, get_engine
-from src.shared.database import get_async_session
+from src.shared_.database import get_async_session
 from src.messaging.infrastructure.dependencies import (
     get_message_service,
     get_redis

@@ -8,7 +8,7 @@ from sqlalchemy import Column, String, DateTime, ForeignKey, Index, Enum as SQLE
 from sqlalchemy.dialects.postgresql import UUID as PGUUID, JSONB
 from sqlalchemy.orm import relationship
 
-from src.shared.infrastructure.database.base import Base
+from src.shared_.infrastructure.database.base import Base
 from src.conversation.domain.value_objects import SessionStatus
 
 

@@ -9,7 +9,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
 
-from src.shared.database.base_model import BaseModel
+from src.shared_.database.base_model import BaseModel
 from src.messaging.domain.entities.message import MessageDirection, MessageStatus, MessageType
 
 

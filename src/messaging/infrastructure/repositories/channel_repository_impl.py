@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, update, delete
 import logging
 
-from shared.database.rls import verify_rls_context
-from shared.errors import RlsNotSetError
+from shared_.database.rls import verify_rls_context
+from shared_.errors import RlsNotSetError
 from src.messaging.domain.interfaces.repositories import ChannelRepository
 from src.messaging.domain.entities.channel import Channel, ChannelStatus
 from src.messaging.infrastructure.models.channel_model import ChannelModel

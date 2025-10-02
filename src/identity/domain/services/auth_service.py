@@ -7,8 +7,8 @@ from src.identity.domain.types import TenantId, UserId
 from src.identity.domain.entities.user import User
 from src.identity.domain.value_objects.email import Email
 from src.identity.domain.repositories.user_repository import UserRepository
-from src.shared.exceptions import AuthenticationError, AuthorizationError
-from src.shared.security.passwords.passlib_hasher import PasswordHasherPort
+from src.shared_.exceptions import AuthenticationError, AuthorizationError
+from src.shared_.security.passwords.passlib_hasher import PasswordHasherPort
 
 
 class AuthService:

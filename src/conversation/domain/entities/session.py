@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 
-from src.shared.domain.entity import Entity
+from src.shared_.domain.entity import Entity
 from src.conversation.domain.value_objects import SessionStatus
 
 

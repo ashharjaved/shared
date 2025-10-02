@@ -4,7 +4,7 @@
 from typing import Optional, Dict, Any, List, Set
 from uuid import UUID
 
-from src.shared.domain.entity import Entity
+from src.shared_.domain.entity import Entity
 from src.conversation.domain.value_objects import StepType, StepAction
 
 

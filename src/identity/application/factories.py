@@ -6,9 +6,9 @@ from typing import Callable, Protocol, Any, TypeVar, Generic, Optional
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 # UoW
-from src.shared.database.types import TenantContext
+from src.shared_.database.types import TenantContext
 from src.identity.infrastructure.repositories.user_repository_impl import UserRepositoryImpl
-from src.shared.database.uow import AsyncUoW
+from src.shared_.database.uow import AsyncUoW
 
 # Services (ports / apps)
 from src.identity.application.services.auth_service import AuthService
@@ -21,8 +21,8 @@ from src.identity.infrastructure.repositories.tenant_repository_impl import (
 )
 
 # Security ports (DIP)
-from src.shared.security.passwords.ports import PasswordHasherPort
-from src.shared.security.tokens.ports import TokenServicePort
+from src.shared_.security.passwords.ports import PasswordHasherPort
+from src.shared_.security.tokens.ports import TokenServicePort
 
 
 # ---------- Provider Protocols (DIP) -----------------------------------------

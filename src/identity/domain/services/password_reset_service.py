@@ -6,7 +6,7 @@ import secrets
 
 from src.identity.domain.types import UserId
 from src.identity.domain.value_objects.email import Email
-from src.shared.exceptions import ValidationError, NotFoundError
+from src.shared_.exceptions import ValidationError, NotFoundError
 
 
 class PasswordResetToken:

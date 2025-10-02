@@ -9,10 +9,10 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
-from src.shared.database.rls import verify_rls_context
+from src.shared_.database.rls import verify_rls_context
 from src.identity.domain.types import TenantId, UserId
-from src.shared.errors import ConflictError, NotFoundError  # aligns with BaseRepository
-from src.shared.database.base_repository import BaseRepository
+from src.shared_.errors import ConflictError, NotFoundError  # aligns with BaseRepository
+from src.shared_.database.base_repository import BaseRepository
 from src.identity.domain.entities.user import User
 from src.identity.domain.repositories.user_repository import UserRepository
 from src.identity.domain.value_objects.role import Role

@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
-from src.shared.database.base_model import BaseModel
+from src.shared_.database.base_model import BaseModel
 from src.identity.domain.entities.tenant import TenantType
 
 if TYPE_CHECKING:

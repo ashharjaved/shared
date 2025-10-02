@@ -7,11 +7,11 @@ from sqlalchemy.exc import IntegrityError
 
 from src.identity.domain.types import TenantId
 from src.identity.infrastructure.Mappers.tenant_mapper import TenantMapper
-from src.shared.database.base_repository import BaseRepository
+from src.shared_.database.base_repository import BaseRepository
 from src.identity.domain.entities.tenant import Tenant
 from src.identity.domain.repositories.tenant_repository import TenantRepository
 from src.identity.infrastructure.models.tenant_model import TenantModel
-from src.shared.exceptions import ConflictError  # BaseRepository already maps most errors
+from src.shared_.exceptions import ConflictError  # BaseRepository already maps most errors
 
 
 class TenantRepositoryImpl(

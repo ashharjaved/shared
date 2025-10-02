@@ -11,7 +11,7 @@ from src.messaging.domain.entities.template import (
 from src.messaging.domain.interfaces.repositories import TemplateRepository, ChannelRepository
 from src.messaging.domain.interfaces.external_services import WhatsAppClient
 from src.messaging.domain.events.message_events import TemplateApproved
-from src.shared.infrastructure.events import EventBus
+from src.shared_.infrastructure.events import EventBus
 
 logger = logging.getLogger(__name__)
 
