@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import JSON, Boolean, DateTime, Integer, String
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
-
+from sqlalchemy.ext.asyncio import AsyncSession
 from shared.infrastructure.database.base_model import Base
 from shared.infrastructure.observability.logger import get_logger
 
@@ -108,7 +108,65 @@ class OutboxPublisher:
     Background worker should call this periodically to process pending events.
     Implements at-least-once delivery with exponential backoff retry.
     """
+    def __init__(self, session: AsyncSession) -> None:
+        """
+        Initialize outbox publisher.
+        
+        Args:
+            session: SQLAlchemy async session
+        """
+        self.session = session
     
+    async def add_event(
+        self,
+        aggregate_id: UUID,
+        aggregate_type: str,
+        event_type: str,
+        event_data: dict[str, Any],
+        occurred_at: datetime,
+    ) -> OutboxEvent:
+        """
+        Add a domain event to the outbox.
+        
+        This is called during transaction commit to persist events
+        alongside business data for guaranteed eventual delivery.
+        
+        Args:
+            aggregate_id: ID of aggregate that produced event
+            aggregate_type: Type of aggregate (e.g., 'User', 'Organization')
+            event_type: Domain event class name
+            event_data: Serialized event payload
+            occurred_at: When the event occurred
+            
+        Returns:
+            Created OutboxEvent instance
+        """
+        event = OutboxEvent(
+            id=uuid4(),
+            aggregate_id=aggregate_id,
+            aggregate_type=aggregate_type,
+            event_type=event_type,
+            event_data=event_data,
+            occurred_at=occurred_at,
+            processed_at=None,
+            retry_count=0,
+            max_retries=3,
+        )
+        
+        self.session.add(event)
+        await self.session.flush()
+        
+        logger.debug(
+            "Added event to outbox",
+            extra={
+                "event_id": str(event.id),
+                "event_type": event_type,
+                "aggregate_id": str(aggregate_id),
+            },
+        )
+        
+        return event
+
     @staticmethod
     async def process_pending_events(
         session: Any,  # AsyncSession

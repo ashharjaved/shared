@@ -2,8 +2,8 @@
 Event bus protocol for domain events.
 Abstracts event publishing without infrastructure dependencies.
 """
-from typing import Protocol, Any
-from src.messaging.domain.events.base_event import DomainEvent
+from typing import Protocol
+from src.messaging.domain.events.message_events import DomainEvent
 
 
 class EventBus(Protocol):

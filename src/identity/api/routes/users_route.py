@@ -1,73 +1,301 @@
-# src/identity/api/routes/users.py
+"""
+User Management Routes
+"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from typing import Any
+from typing import Annotated, Optional
+from uuid import UUID
 
-from src.shared_.security.passwords.factory import build_password_hasher
-from src.identity.domain.services.rbac_policy import Role
-from src.identity.api.schemas import UserCreate, UserRead
-from src.identity.application.services.user_service import UserService
-from src.identity.application.factories import make_user_service  # UoW-aware
-from src.shared_.http.dependencies import get_current_user, require_role
-from src.shared_.exceptions import NotFoundError, AuthorizationError, DomainConflictError
-from src.shared_.database.database import get_session_factory
+from fastapi import APIRouter, Depends, Request, HTTPException, status, Query
 
-router = APIRouter(prefix="/api/identity/users", tags=["Identity:Users"])
-
-async def provide_user_service() -> "UserService":
-    """
-    Assemble UserService using composition factories.
-    Keeps construction consistent with the Tenants route.
-    """
-    session_factory = get_session_factory()
-    password_hasher = build_password_hasher()
-    return make_user_service(session_factory=session_factory, password_hasher=password_hasher)
-
-@router.get("/me", response_model=UserRead)
-async def me(current_user = Depends(get_current_user)) -> UserRead:
-    return UserRead.model_validate(current_user)
-
-@router.post("", response_model=UserRead)
-async def create_user(
-    payload: UserCreate,
-    request: Request,
-    current_user = Depends(get_current_user),
-    svc: UserService = Depends(provide_user_service),
-) -> UserRead:
-    """
-    SUPER_ADMIN can create in any tenant.
-    Other actors can create only inside their own tenant (and limited role as per policy).
-    """
-    try:
-        user = await svc.create_user(
-            requester=current_user,
-            data=payload.model_dump(),
-            correlation_id=request.headers.get("X-Correlation-ID"),
-        )
-        return UserRead.model_validate(user)
-    except (DomainConflictError, AuthorizationError, NotFoundError) as e:
-        raise HTTPException(status_code=e.status_code, detail={"code": e.code, "message": str(e)})
-
-@router.put(
-    "/{user_id}/role",
-    response_model=UserRead,
-    dependencies=[Depends(require_role(Role.TENANT_ADMIN))],
+from shared.infrastructure.observability.logger import get_logger
+from src.identity.api.schemas.user_schemas import (
+    CreateUserRequest,
+    UserResponse,
+    UserListResponse,
+    DeactivateUserRequest,
 )
-async def change_role(
-    user_id: str,
-    new_role: str,
-    request: Request,
-    current_user = Depends(get_current_user),
-    svc: UserService = Depends(provide_user_service),
-) -> UserRead:
-    try:
-        user = await svc.change_user_role(
-            requester=current_user,
-            target_user_id=user_id,
-            new_role=new_role,
-            correlation_id=request.headers.get("X-Correlation-ID"),
+from src.identity.api.dependencies import (
+    get_current_active_user,
+    require_roles,
+    get_uow,
+    CurrentUser,
+)
+from src.identity.application.services.user_service import UserService
+from src.identity.infrastructure.adapters.identity_unit_of_work import IdentityUnitOfWork
+
+logger = get_logger(__name__)
+
+router = APIRouter()
+
+
+@router.post(
+    "",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create User",
+    description="Create a new user in the organization",
+    dependencies=[Depends(require_roles("TenantAdmin", "SuperAdmin"))],
+)
+async def create_user(
+    body: CreateUserRequest,
+    current_user: Annotated[CurrentUser, Depends(get_current_active_user)],
+    uow: Annotated[IdentityUnitOfWork, Depends(get_uow)],
+) -> UserResponse:
+    """
+    Create a new user.
+    
+    Requires TenantAdmin or SuperAdmin role.
+    """
+    user_service = UserService(uow)
+    
+    result = await user_service.create_user(
+        organization_id=current_user.organization_id,
+        email=body.email,
+        password=body.password,
+        full_name=body.full_name,
+        phone=body.phone,
+        created_by=current_user.user_id,
+    )
+    
+    if result.is_failure():
+        logger.warning(f"User creation failed: {result.error}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "user_creation_failed",
+                "message": result.error,
+            },
         )
-        return UserRead.model_validate(user)
-    except (AuthorizationError, NotFoundError) as e:
-        raise HTTPException(status_code=e.status_code, detail={"code": e.code, "message": str(e)})
+    
+    user_id = result
+    
+    # Get created user
+    user_result = await user_service.get_user_by_id(
+        user_id=UUID(user_id),
+        organization_id=current_user.organization_id,
+    )
+    
+    if user_result.is_failure() or not user_result.value:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "internal_error",
+                "message": "User created but could not be retrieved",
+            },
+        )
+    
+    user_dto = user_result.value
+    
+    return UserResponse(
+        id=user_dto.id,
+        organization_id=user_dto.organization_id,
+        email=user_dto.email,
+        full_name=user_dto.full_name,
+        phone=user_dto.phone,
+        is_active=user_dto.is_active,
+        email_verified=user_dto.email_verified,
+        phone_verified=user_dto.phone_verified,
+        last_login_at=user_dto.last_login_at,
+        created_at=user_dto.created_at,
+    )
+
+
+@router.get(
+    "",
+    response_model=UserListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List Users",
+    description="Get paginated list of users in organization",
+)
+async def list_users(
+    current_user: Annotated[CurrentUser, Depends(get_current_active_user)],
+    uow: Annotated[IdentityUnitOfWork, Depends(get_uow)],
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum records to return"),
+    is_active: Optional[bool] = Query(None, description="Filter by active status"),
+) -> UserListResponse:
+    """
+    List users in organization with pagination.
+    
+    Requires authentication.
+    """
+    user_service = UserService(uow)
+    
+    result = await user_service.list_users(
+        organization_id=current_user.organization_id,
+        skip=skip,
+        limit=limit,
+        is_active=is_active,
+    )
+    
+    if result.is_failure():
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "internal_error",
+                "message": result.error,
+            },
+        )
+    
+    list_dto = result.value
+    
+    users = [
+        UserResponse(
+            id=u.id,
+            organization_id=u.organization_id,
+            email=u.email,
+            full_name=u.full_name,
+            phone=u.phone,
+            is_active=u.is_active,
+            email_verified=u.email_verified,
+            phone_verified=u.phone_verified,
+            last_login_at=u.last_login_at,
+            created_at=u.created_at,
+        )
+        for u in list_dto.users
+    ]
+    
+    return UserListResponse(
+        users=users,
+        total=list_dto.total,
+        skip=list_dto.skip,
+        limit=list_dto.limit,
+    )
+
+
+@router.get(
+    "/{user_id}",
+    response_model=UserResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get User",
+    description="Get user by ID",
+)
+async def get_user(
+    user_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_active_user)],
+    uow: Annotated[IdentityUnitOfWork, Depends(get_uow)],
+) -> UserResponse:
+    """
+    Get user by ID.
+    
+    Requires authentication. RLS ensures only same-org users visible.
+    """
+    user_service = UserService(uow)
+    
+    result = await user_service.get_user_by_id(
+        user_id=user_id,
+        organization_id=current_user.organization_id,
+    )
+    
+    if result.is_failure():
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "internal_error",
+                "message": result.error,
+            },
+        )
+    
+    if not result.value:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "not_found",
+                "message": f"User not found: {user_id}",
+            },
+        )
+    
+    user_dto = result.value
+    
+    return UserResponse(
+        id=user_dto.id,
+        organization_id=user_dto.organization_id,
+        email=user_dto.email,
+        full_name=user_dto.full_name,
+        phone=user_dto.phone,
+        is_active=user_dto.is_active,
+        email_verified=user_dto.email_verified,
+        phone_verified=user_dto.phone_verified,
+        last_login_at=user_dto.last_login_at,
+        created_at=user_dto.created_at,
+    )
+
+
+@router.post(
+    "/{user_id}/deactivate",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Deactivate User",
+    description="Deactivate a user account",
+    dependencies=[Depends(require_roles("TenantAdmin", "SuperAdmin"))],
+)
+async def deactivate_user(
+    user_id: UUID,
+    body: DeactivateUserRequest,
+    current_user: Annotated[CurrentUser, Depends(get_current_active_user)],
+    uow: Annotated[IdentityUnitOfWork, Depends(get_uow)],
+) -> dict:
+    """
+    Deactivate a user account.
+    
+    Requires TenantAdmin or SuperAdmin role.
+    Revokes all active sessions.
+    """
+    user_service = UserService(uow)
+    
+    result = await user_service.deactivate_user(
+        user_id=user_id,
+        organization_id=current_user.organization_id,
+        deactivated_by=current_user.user_id,
+        reason=body.reason,
+    )
+    
+    if result.is_failure():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "deactivation_failed",
+                "message": result.error,
+            },
+        )
+    
+    return {"message": "User deactivated successfully"}
+
+
+@router.post(
+    "/{user_id}/reactivate",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Reactivate User",
+    description="Reactivate a deactivated user account",
+    dependencies=[Depends(require_roles("TenantAdmin", "SuperAdmin"))],
+)
+async def reactivate_user(
+    user_id: UUID,
+    current_user: Annotated[CurrentUser, Depends(get_current_active_user)],
+    uow: Annotated[IdentityUnitOfWork, Depends(get_uow)],
+) -> dict:
+    """
+    Reactivate a deactivated user account.
+    
+    Requires TenantAdmin or SuperAdmin role.
+    """
+    user_service = UserService(uow)
+    
+    result = await user_service.reactivate_user(
+        user_id=user_id,
+        organization_id=current_user.organization_id,
+        reactivated_by=current_user.user_id,
+    )
+    
+    if result.is_failure():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "reactivation_failed",
+                "message": result.error,
+            },
+        )
+    
+    return {"message": "User reactivated successfully"}

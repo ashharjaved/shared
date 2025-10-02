@@ -4,7 +4,7 @@ All queries (read operations) inherit from this
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 
@@ -26,5 +26,5 @@ class BaseQuery:
     """
     
     # Optional: query metadata
-    query_id: UUID | None = None
-    requested_by: UUID | None = None  # User who requested the query
+    query_id: UUID | None = field(default=None, kw_only=True)
+    requested_by: UUID | None = field(default=None, kw_only=True)  # User who requested the query

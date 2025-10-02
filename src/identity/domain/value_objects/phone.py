@@ -1,35 +1,41 @@
-# src/identity/domain/value_objects/phone.py
-"""Phone value object."""
+"""
+Phone Number Value Object
+"""
+from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Self
+from typing import Final
 
-from ..exception import ValidationError
+from shared.domain.base_value_object import BaseValueObject
 
 
-@dataclass(frozen=True, slots=True)
-class PhoneNumber:
-    """E.164 formatted phone number value object."""
+# E.164 format: +[country code][number]
+PHONE_REGEX: Final[str] = r'^\+[1-9]\d{1,14}$'
+
+
+class Phone(BaseValueObject):
+    """
+    Phone number value object (E.164 format).
     
-    value: str
+    Example: +919876543210
+    """
     
-    def __post_init__(self) -> None:
-        if not self.value:
-            raise ValidationError("Phone cannot be empty")
+    def __init__(self, value: str) -> None:
+        normalized = value.strip()
         
-        # E.164 format: +1234567890 (1-15 digits)
-        pattern = r'^\+[1-9]\d{1,14}$'
-        if not re.match(pattern, self.value):
-            raise ValidationError(f"Phone must be in E.164 format (+1234567890): {self.value}")
+        if not re.match(PHONE_REGEX, normalized):
+            raise ValueError(
+                f"Invalid phone format. Must be E.164 format (+country code + number): {value}"
+            )
+        
+        self._value = normalized
     
-    @classmethod
-    def from_string(cls, phone: str) -> Self:
-        """Create Phone from string, adding + if missing."""
-        phone = phone.strip()
-        if not phone.startswith('+'):
-            phone = '+' + phone
-        return cls(phone)
+    @property
+    def value(self) -> str:
+        return self._value
     
     def __str__(self) -> str:
-        return self.value
+        return self._value
+    
+    def _get_equality_components(self) -> tuple:
+        return (self._value,)

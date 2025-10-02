@@ -57,3 +57,8 @@ class BaseEntity(ABC):
     def mark_updated(self) -> None:
         """Update the updated_at timestamp to current time."""
         self.updated_at = datetime.utcnow()
+        
+    def _touch(self) -> None:
+        """Internal helper to bump updated_at after state changes."""
+        self.mark_updated()
+

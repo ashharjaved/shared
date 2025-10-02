@@ -8,11 +8,13 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, List, Mapping, Union
 from uuid import UUID
 
-from src.conversation.domain.types import JSONValue
 from src.shared_.errors import ValidationError
+JSONValue = Union[str, int, float, bool, None, "JSONObject", "JSONArray"]
+JSONObject = Dict[str, JSONValue]
+JSONArray = List[JSONValue]
 
 class SafeEncoder(json.JSONEncoder):
     def default(self, o: Any):

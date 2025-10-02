@@ -8,7 +8,7 @@ import logging
 
 from src.messaging.domain.entities.message import Message, MessageDirection, MessageType, MessageStatus
 from src.messaging.domain.interfaces.repositories import MessageRepository, ChannelRepository, TemplateRepository
-from src.messaging.domain.interfaces.external_services import WhatsAppClient
+from messaging.domain.protocols.external_services import WhatsAppClient
 from src.messaging.infrastructure.rate_limiter.token_bucket import TokenBucketRateLimiter
 from src.messaging.infrastructure.outbox.outbox_service import OutboxService
 

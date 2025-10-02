@@ -1,42 +1,73 @@
-"""Phone number value object."""
+# src/modules/whatsapp/domain/value_objects/phone_number.py
+"""
+Phone Number Value Object
+Represents WhatsApp-compatible phone number in E.164 format
+"""
+from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from typing import Any
+
+from src.shared.domain.base_value_object import BaseValueObject
 
 
-@dataclass(frozen=True)
-class PhoneNumber:
+class PhoneNumber(BaseValueObject):
     """
-    Validated phone number in E.164 format.
-    Immutable value object.
-    """
-    value: str
+    E.164 formatted phone number (e.g., +919876543210).
     
-    def __post_init__(self):
-        """Validate phone number format."""
-        # E.164 format: +[country code][subscriber number]
-        # Max 15 digits, starting with +
-        pattern = r'^\+[1-9]\d{1,14}$'
-        if not re.match(pattern, self.value):
-            raise ValueError(f"Invalid phone number format: {self.value}")
+    WhatsApp requires E.164 format:
+    - Starts with +
+    - Country code (1-3 digits)
+    - National number (up to 15 digits total)
+    
+    Examples:
+        +14155552671 (US)
+        +919876543210 (India)
+        +442071838750 (UK)
+    """
+    
+    E164_PATTERN = re.compile(r"^\+[1-9]\d{1,14}$")
+    
+    def __init__(self, value: str) -> None:
+        """
+        Initialize phone number with validation.
+        
+        Args:
+            value: Phone number string
+            
+        Raises:
+            ValueError: If phone number format is invalid
+        """
+        cleaned = value.strip()
+        
+        if not self.E164_PATTERN.match(cleaned):
+            raise ValueError(
+                f"Invalid phone number format: {value}. "
+                f"Must be E.164 format (e.g., +919876543210)"
+            )
+        
+        super().__setattr__("_value", cleaned)
+        self._finalize_init()
+    
+    @property
+    def value(self) -> str:
+        """Get the phone number string."""
+        return self.value
     
     @property
     def country_code(self) -> str:
-        """Extract country code from phone number."""
-        # Simple extraction - would need country code table for accuracy
-        if self.value.startswith('+1'):
-            return '1'  # US/Canada
-        elif self.value.startswith('+91'):
-            return '91'  # India
-        # Add more as needed
-        return self.value[1:3]
+        """Extract country code (including +)."""
+        # Simple heuristic: 1-3 digits after +
+        for i in range(2, 5):  # +1, +91, +442
+            if len(self.value) > i:
+                return self.value[:i]
+        return self.value[:2]
     
     @property
-    def masked(self) -> str:
-        """Return masked version showing only last 4 digits."""
-        if len(self.value) > 4:
-            return f"***{self.value[-4:]}"
-        return "****"
+    def national_number(self) -> str:
+        """Get number without country code."""
+        return self.value[len(self.country_code):]
     
     def __str__(self) -> str:
+        """String representation."""
         return self.value

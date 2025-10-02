@@ -10,7 +10,7 @@ from uuid import UUID
 from src.messaging.infrastructure.events.event_bus import EventBus
 from src.messaging.domain.entities.channel import Channel, ChannelStatus
 from src.messaging.domain.interfaces.repositories import ChannelRepository
-from src.messaging.domain.interfaces.external_services import WhatsAppClient, EncryptionService, WhatsAppMessageRequest
+from messaging.domain.protocols.external_services import WhatsAppClient, EncryptionService, WhatsAppMessageRequest
 from src.messaging.domain.events.message_events import ChannelActivated
 #from src.shared.infrastructure.events import EventBus
 

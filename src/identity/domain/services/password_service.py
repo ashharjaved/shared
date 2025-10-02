@@ -19,7 +19,7 @@ class PasswordService:
             raise ValidationError("Password does not meet requirements")
 
         hashed_str = self._hasher.hash(plain_password)
-        return PasswordHash.from_hash(hashed_str)
+        return PasswordHash.from_plain_text(hashed_str)
 
     def verify_password(self, plain_password: str, hashed: PasswordHash) -> bool:
         """

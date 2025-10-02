@@ -1,46 +1,38 @@
-# src/identity/domain/value_objects/email.py
-"""Email value object."""
+"""
+Email Value Object
+"""
+from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Self
+from typing import Final
 
-from ..exception import ValidationError
+from shared.domain.base_value_object import BaseValueObject
 
 
-@dataclass(frozen=True, slots=True)
-class Email:
-    """Email address value object with RFC-lite validation."""
+EMAIL_REGEX: Final[str] = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+
+class Email(BaseValueObject):
+    """
+    Email address value object with validation.
     
-    value: str
+    Ensures email format is valid and normalizes to lowercase.
+    """
     
-    def __post_init__(self) -> None:
-        if not self.value:
-            raise ValidationError("Email cannot be empty")
+    def __init__(self, value: str) -> None:
+        normalized = value.lower().strip()
         
-        normalized = self.value.lower().strip()
-        if normalized != self.value:
-            # Use object.__setattr__ to modify frozen dataclass
-            object.__setattr__(self, 'value', normalized)
+        if not re.match(EMAIL_REGEX, normalized):
+            raise ValueError(f"Invalid email format: {value}")
         
-        # RFC-lite email validation
-        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(pattern, self.value):
-            raise ValidationError(f"Invalid email format: {self.value}")
-        
-        if len(self.value) > 254:  # RFC 5321 limit
-            raise ValidationError("Email address too long")
+        self._value = normalized
     
-    @classmethod
-    def from_string(cls, email: str) -> Self:
-        """Create Email from string with normalization."""
-        return cls(email.lower().strip())
-    
-    def domain(self) -> str:
-        """Extract domain part of email."""
-        return self.value.split('@')[1]
-
+    @property
+    def value(self) -> str:
+        return self._value
     
     def __str__(self) -> str:
-        return self.value
+        return self._value
     
+    def _get_equality_components(self) -> tuple:
+        return (self._value,)

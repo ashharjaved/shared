@@ -1,33 +1,84 @@
-# src/identity/domain/value_objects/password_hash.py
-"""Password hash value object."""
+"""
+Password Hash Value Object
+Handles Argon2id hashing and verification
+"""
+from __future__ import annotations
 
-from dataclasses import dataclass
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, InvalidHash
 
-from ..exception import ValidationError
+from shared.domain.base_value_object import BaseValueObject
 
 
-@dataclass(frozen=True, slots=True)
-class PasswordHash:
-    """Opaque wrapper for already-hashed password values."""
+class PasswordHash(BaseValueObject):
+    """
+    Password hash value object using Argon2id.
     
-    value: str
+    Handles hashing and verification securely.
+    Never stores plain text passwords.
+    """
     
-    def __post_init__(self) -> None:
-        if not self.value:
-            raise ValidationError("Password hash cannot be empty")
+    _hasher = PasswordHasher(
+        time_cost=2,  # iterations
+        memory_cost=65536,  # 64 MB
+        parallelism=4,  # threads
+        hash_len=32,  # output length
+        salt_len=16,  # salt length
+    )
+    
+    def __init__(self, hashed_value: str) -> None:
+        """
+        Create from already-hashed password.
         
-        # Basic validation - should look like a hash
-        if len(self.value) < 32:
-            raise ValidationError("Password hash appears invalid (too short)")
-        
+        Args:
+            hashed_value: Argon2id hash string
+        """
+        self._value = hashed_value
+        self._finalize_init()  # ← FIX: Enforce immutability
+    
     @classmethod
-    def from_hash(cls, hashed_value: str) -> "PasswordHash":
-        if not isinstance(hashed_value, str) or not hashed_value:
-            raise ValueError("invalid_hashed_password")
-        return cls(hashed_value)
+    def from_plain_text(cls, plain_password: str) -> PasswordHash:
+        """
+        Hash a plain text password.
+        
+        Args:
+            plain_password: Plain text password
+            
+        Returns:
+            PasswordHash instance with hashed value
+        """
+        if len(plain_password) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        
+        hashed = cls._hasher.hash(plain_password)
+        return cls(hashed)
+    
+    def verify(self, plain_password: str) -> bool:
+        """
+        Verify a plain text password against this hash.
+        
+        Args:
+            plain_password: Plain text password to verify
+            
+        Returns:
+            True if password matches, False otherwise
+        """
+        try:
+            self._hasher.verify(self._value, plain_password)
+            return True
+        except (VerifyMismatchError, InvalidHash):
+            return False
+    
+    def needs_rehash(self) -> bool:
+        """Check if hash needs updating due to new security parameters"""
+        return self._hasher.check_needs_rehash(self._value)
+    
+    @property
+    def value(self) -> str:
+        return self._value
     
     def __str__(self) -> str:
-        return "[REDACTED]"
+        return "[REDACTED]"  # Never expose hash
     
-    def __repr__(self) -> str:
-        return f"PasswordHash([REDACTED])"
+    def _get_equality_components(self) -> tuple:
+        return (self._value,)

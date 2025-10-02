@@ -6,9 +6,11 @@ from uuid import UUID
 from datetime import datetime
 import logging
 
-from src.messaging.domain.interfaces.repositories import MessageRepository
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+
+from messaging.domain.protocols.message_repository import MessageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,7 @@ class GetDeliveryStatusQueryHandler:
             # Get message
             message = None
             if query.message_id:
-                message = await self.message_repo.get_by_id(query.message_id, query.tenant_id)
+                message = await self.message_repo.get_inbound_by_wa_id(query.message_id, query.tenant_id)
             elif query.whatsapp_message_id:
                 message = await self.message_repo.get_by_whatsapp_id(
                     query.whatsapp_message_id,

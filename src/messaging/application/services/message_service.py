@@ -16,7 +16,7 @@ from src.messaging.domain.value_objects.phone_number import PhoneNumber
 from src.messaging.domain.interfaces.repositories import (
     MessageRepository, ChannelRepository, TemplateRepository
 )
-from src.messaging.domain.interfaces.external_services import (
+from messaging.domain.protocols.external_services import (
     WhatsAppClient, WhatsAppMessageRequest, WhatsAppMessageResponse
 )
 from src.messaging.infrastructure.rate_limiter.token_bucket import TokenBucketRateLimiter

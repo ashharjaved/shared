@@ -1,78 +1,97 @@
-"""WhatsApp Channel entity - core business logic for channel management."""
+"""WhatsApp Channel aggregate root."""
 
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
-from enum import Enum
+from typing import Optional, Dict, Any
 from uuid import UUID
 
-class ChannelStatus(Enum):
-    """Channel connection status."""
-    PENDING = "pending"
-    ACTIVE = "active"
-    SUSPENDED = "suspended"
-    INACTIVE = "inactive"
+from shared.domain.base_aggregate_root import BaseAggregateRoot
+from src.messaging.domain.value_objects import (
+    PhoneNumber,
+    WhatsAppBusinessAccountId,
+    AccessToken,
+    RateLimitTier,
+    ChannelStatus
+)
 
+class Channel(BaseAggregateRoot):
+    """WhatsApp Business Account Channel."""
 
-@dataclass
-class Channel:
-    """
-    WhatsApp Business API channel configuration.
-    Represents a phone number connected to WhatsApp Business API.
-    """
-    id: UUID
-    tenant_id: UUID
-    name: str
-    phone_number_id: str  # WhatsApp Phone Number ID
-    business_phone: str  # Display phone number
-    access_token: str  # Encrypted
-    status: ChannelStatus
-    rate_limit_per_second: int = 80
-    monthly_message_limit: Optional[int] = None
-    current_month_usage: int = 0
-    webhook_verify_token: Optional[str] = None
-    created_at: Optional[datetime] = None 
-    updated_at: Optional[datetime] = None
-    
-    def __post_init__(self):
-        """Initialize timestamps if not provided."""
-        now = datetime.utcnow()
-        if self.created_at is None:
-            self.created_at = now
-        if self.updated_at is None:
-            self.updated_at = now
-    
-    def can_send_message(self) -> bool:
-        """Check if channel can send messages."""
-        if self.status != ChannelStatus.ACTIVE:
-            return False
-        if self.monthly_message_limit and self.current_month_usage >= self.monthly_message_limit:
-            return False
-        return True
-    
-    def increment_usage(self) -> None:
-        """Increment monthly usage counter."""
-        self.current_month_usage += 1
-        self.updated_at = datetime.utcnow()
-    
-    def reset_monthly_usage(self) -> None:
-        """Reset monthly usage counter."""
-        self.current_month_usage = 0
-        self.updated_at = datetime.utcnow()
-    
-    def activate(self) -> None:
-        """Activate the channel."""
-        if self.status == ChannelStatus.SUSPENDED:
-            raise ValueError("Cannot activate suspended channel without admin intervention")
-        self.status = ChannelStatus.ACTIVE
-        self.updated_at = datetime.utcnow()
-    
-    def deactivate(self) -> None:
-        """Deactivate the channel."""
-        self.status = ChannelStatus.INACTIVE
-        self.updated_at = datetime.utcnow()
-    
+    def __init__(
+        self,
+        id: UUID,
+        organization_id: UUID,
+        phone_number: PhoneNumber,
+        business_account_id: WhatsAppBusinessAccountId,
+        access_token: AccessToken,
+        webhook_verify_token: str,
+        status: ChannelStatus = ChannelStatus.ACTIVE,
+        rate_limit_tier: RateLimitTier = RateLimitTier.STANDARD,
+        metadata: Optional[Dict[str, Any]] = None,
+        created_at: Optional[datetime] = None,
+        updated_at: Optional[datetime] = None
+    ):
+        super().__init__(id)
+        self.organization_id = organization_id
+        self.phone_number = phone_number
+        self.business_account_id = business_account_id
+        self.access_token = access_token
+        self.webhook_verify_token = webhook_verify_token
+        self.status = status
+        self.rate_limit_tier = rate_limit_tier
+        self.metadata = metadata or {}
+        self.created_at = created_at or datetime.utcnow()
+        self.updated_at = updated_at or datetime.utcnow()
+
+    @classmethod
+    def provision(
+        cls,
+        organization_id: UUID,
+        phone_number: str,
+        phone_number_id: str,
+        business_account_id: str,
+        access_token: str,
+        webhook_verify_token: str,
+        rate_limit_tier: str = "standard"
+    ) -> "Channel":
+        """Provision a new WhatsApp channel."""
+        channel = cls(
+            id=UUID(),
+            organization_id=organization_id,
+            phone_number=PhoneNumber(phone_number),
+            business_account_id=WhatsAppBusinessAccountId(business_account_id),
+            access_token=AccessToken(access_token),
+            webhook_verify_token=webhook_verify_token,
+            status=ChannelStatus.ACTIVE,
+            rate_limit_tier=RateLimitTier.from_string(rate_limit_tier)
+        )        
+        
+        return channel
+
     def suspend(self, reason: str) -> None:
-        """Suspend channel (e.g., for violations)."""
+        """Suspend the channel."""
+        if self.status == ChannelStatus.SUSPENDED:
+            return
+            
         self.status = ChannelStatus.SUSPENDED
+        self.metadata["suspension_reason"] = reason
+        self.metadata["suspended_at"] = datetime.utcnow().isoformat()
         self.updated_at = datetime.utcnow()
+        
+    def activate(self) -> None:
+        """Reactivate a suspended channel."""
+        if self.status == ChannelStatus.ACTIVE:
+            return
+            
+        self.status = ChannelStatus.ACTIVE
+        self.metadata.pop("suspension_reason", None)
+        self.metadata.pop("suspended_at", None)
+        self.updated_at = datetime.utcnow()
+        
+    def update_access_token(self, new_token: str) -> None:
+        """Update the access token."""
+        self.access_token = AccessToken(new_token)
+        self.updated_at = datetime.utcnow()
+
+    def can_send_messages(self) -> bool:
+        """Check if channel can send messages."""
+        return self.status == ChannelStatus.ACTIVE

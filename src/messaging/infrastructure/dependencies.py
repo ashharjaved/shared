@@ -7,8 +7,8 @@ import redis.asyncio as redis
 
 from src.shared_.database.deps import get_tenant_scoped_db
 from src.messaging.infrastructure.adapters.whatsapp_adapter import WhatsAppAPIAdapter
-from src.messaging.infrastructure.adapters.encryption_adapter import EncryptionAdapter
-from src.messaging.infrastructure.adapters.google_speech_adapter import GoogleSpeechAdapter
+from messaging.infrastructure.persistence.adapter.encryption_adapter import EncryptionAdapter
+from messaging.infrastructure.persistence.adapter.google_speech_adapter import GoogleSpeechAdapter
 from src.messaging.infrastructure.repositories.channel_repository_impl import ChannelRepositoryImpl
 from src.messaging.infrastructure.repositories.message_repository_impl import MessageRepositoryImpl
 from src.messaging.infrastructure.repositories.template_repository_impl import TemplateRepositoryImpl

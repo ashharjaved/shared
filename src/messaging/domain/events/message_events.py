@@ -1,109 +1,105 @@
-"""Domain events for messaging."""
+"""Domain events for WhatsApp module."""
 
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Dict, Any
 from uuid import UUID
 
-
-@dataclass
-class DomainEvent:
-    """Base domain event."""
-    event_id: UUID
-    aggregate_id: UUID
-    tenant_id: UUID
-    event_type: str = field(init=False)
-    occurred_at: datetime
-    metadata: Optional[Dict[str, Any]] = None
+from shared.domain.domain_event import DomainEvent
 
 
-@dataclass
-class MessageReceived(DomainEvent):
-    """Event when message is received via webhook."""
-    channel_id: Optional[UUID] = None
-    from_number: Optional[str] = None
-    message_type: Optional[str] = None
-    content: Optional[str] = None
-    whatsapp_message_id: Optional[str] = None
+class ChannelProvisionedEvent(DomainEvent):
+    """Event raised when a new channel is provisioned."""
     
-    def __post_init__(self):
-        if self.channel_id is None or self.from_number is None or self.message_type is None:
-            raise ValueError("channel_id, from_number, and message_type are required")
-        self.event_type = "message.received"
+    def __init__(
+        self,
+        channel_id: UUID,
+        organization_id: UUID,
+        phone_number: str
+    ):
+        super().__init__()
+        self.channel_id = channel_id
+        self.organization_id = organization_id
+        self.phone_number = phone_number
 
 
-@dataclass
-class MessageSent(DomainEvent):
-    """Event when message is sent successfully."""
-    channel_id: Optional[UUID] = None
-    to_number: Optional[str] = None
-    message_type: Optional[str] = None
-    whatsapp_message_id: Optional[str] = None
+class ChannelSuspendedEvent(DomainEvent):
+    """Event raised when a channel is suspended."""
     
-    def __post_init__(self):
-        if self.channel_id is None or self.to_number is None or self.message_type is None or self.whatsapp_message_id is None:
-            raise ValueError("channel_id, to_number, message_type, and whatsapp_message_id are required")
-        self.event_type = "message.sent"
+    def __init__(self, channel_id: UUID, reason: str):
+        super().__init__()
+        self.channel_id = channel_id
+        self.reason = reason
 
 
-@dataclass
-class MessageRead(DomainEvent):
-    """Event when message is read."""
-    whatsapp_message_id: Optional[str] = None
-    read_at: Optional[datetime] = None
+class ChannelActivatedEvent(DomainEvent):
+    """Event raised when a channel is activated."""
     
-    def __post_init__(self):
-        if self.whatsapp_message_id is None or self.read_at is None:
-            raise ValueError("whatsapp_message_id and read_at are required")
-        self.event_type = "message.read"
+    def __init__(self, channel_id: UUID):
+        super().__init__()
+        self.channel_id = channel_id
 
 
-@dataclass
-class MessageDelivered(DomainEvent):
-    """Event when message is delivered."""
-    whatsapp_message_id: Optional[str] = None
-    delivered_at: Optional[datetime] = None
+class MessageReceivedEvent(DomainEvent):
+    """Event raised when an inbound message is received."""
     
-    def __post_init__(self):
-        if self.whatsapp_message_id is None or self.delivered_at is None:
-            raise ValueError("whatsapp_message_id and delivered_at are required")
-        self.event_type = "message.delivered"
+    def __init__(
+        self,
+        message_id: UUID,
+        channel_id: UUID,
+        from_phone: str,
+        message_type: str,
+        content: Dict[str, Any]
+    ):
+        super().__init__()
+        self.message_id = message_id
+        self.channel_id = channel_id
+        self.from_phone = from_phone
+        self.message_type = message_type
+        self.content = content
 
 
-@dataclass
-class MessageFailed(DomainEvent):
-    """Event when message fails to send."""
-    channel_id: Optional[UUID] = None
-    to_number: Optional[str] = None
-    error_code: Optional[str] = None
-    error_message: Optional[str] = None
-    retry_count: Optional[int] = None
+class MessageSentEvent(DomainEvent):
+    """Event raised when a message is sent successfully."""
     
-    def __post_init__(self):
-        if self.channel_id is None or self.to_number is None or self.error_code is None or self.error_message is None or self.retry_count is None:
-            raise ValueError("channel_id, to_number, error_code, error_message, and retry_count are required")
-        self.event_type = "message.failed"
+    def __init__(
+        self,
+        message_id: UUID,
+        channel_id: UUID,
+        to_phone: str,
+        wa_message_id: str
+    ):
+        super().__init__()
+        self.message_id = message_id
+        self.channel_id = channel_id
+        self.to_phone = to_phone
+        self.wa_message_id = wa_message_id
 
 
-@dataclass
-class ChannelActivated(DomainEvent):
-    """Event when channel is activated."""
-    channel_name: Optional[str] = None
-    phone_number: Optional[str] = None
+class MessageDeliveredEvent(DomainEvent):
+    """Event raised when a message is delivered."""
     
-    def __post_init__(self):
-        if self.channel_name is None or self.phone_number is None:
-            raise ValueError("channel_name and phone_number are required")
-        self.event_type = "channel.activated"
+    def __init__(
+        self,
+        message_id: UUID,
+        wa_message_id: str,
+        timestamp: datetime
+    ):
+        super().__init__()
+        self.message_id = message_id
+        self.wa_message_id = wa_message_id
+        self.timestamp = timestamp
 
 
-@dataclass
-class TemplateApproved(DomainEvent):
-    """Event when template is approved."""
-    template_name: Optional[str] = None
-    whatsapp_template_id: Optional[str] = None
+class MessageFailedEvent(DomainEvent):
+    """Event raised when message delivery fails."""
     
-    def __post_init__(self):
-        if self.template_name is None or self.whatsapp_template_id is None:
-            raise ValueError("template_name and whatsapp_template_id are required")
-        self.event_type = "template.approved"
+    def __init__(
+        self,
+        message_id: UUID,
+        error_code: str,
+        error_message: str
+    ):
+        super().__init__()
+        self.message_id = message_id
+        self.error_code = error_code
+        self.error_message = error_message
