@@ -2,10 +2,11 @@
 """
 WhatsApp Repository Implementations
 """
-from .message_repository_impl import SQLAlchemyMessageRepository
-from .channel_repository_impl import SQLAlchemyChannelRepository
+from .channel_repository_impl import ChannelRepositoryImpl
+from .message_repository_impl import InboundMessageRepositoryImpl, OutboundMessageRepositoryImpl
 
 __all__ = [
-    "SQLAlchemyChannelRepository",
-    "SQLAlchemyMessageRepository"
+    "ChannelRepositoryImpl",
+    "InboundMessageRepositoryImpl",
+    "OutboundMessageRepositoryImpl"
 ]

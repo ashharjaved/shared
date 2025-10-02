@@ -1,34 +1,45 @@
-from abc import ABC, abstractmethod
-from typing import Optional, List, Dict, Any
+"""
+Channel Repository Protocol
+Defines persistence interface for Channel aggregate.
+"""
+from abc import abstractmethod
+from typing import Optional, List, Protocol
 from uuid import UUID
 
-from messaging.domain.entities.channel import Channel
+from src.messaging.domain.entities.channel import Channel
 
 
-class ChannelRepository(ABC):
-    """Repository interface for Channel aggregate."""
+class ChannelRepository(Protocol):
+    """Repository protocol for Channel persistence."""
     
     @abstractmethod
     async def get_by_id(self, channel_id: UUID) -> Optional[Channel]:
-        """Get channel by ID."""
-        pass
+        """Retrieve channel by ID."""
+        ...
     
     @abstractmethod
-    async def get_by_phone_number_id(self, phone_number_id: str) -> Optional[Channel]:
-        """Get channel by WhatsApp phone number ID."""
-        pass
+    async def get_by_tenant_and_phone(
+        self, tenant_id: UUID, phone_number_id: str
+    ) -> Optional[Channel]:
+        """Find channel by tenant and phone number ID."""
+        ...
     
     @abstractmethod
-    async def get_by_organization(self, organization_id: UUID) -> List[Channel]:
-        """Get all channels for an organization."""
-        pass
+    async def list_by_tenant(self, tenant_id: UUID) -> List[Channel]:
+        """List all channels for a tenant."""
+        ...
     
     @abstractmethod
-    async def save(self, channel: Channel) -> Channel:
-        """Save channel."""
-        pass
+    async def create(self, channel: Channel) -> Channel:
+        """Persist new channel."""
+        ...
     
     @abstractmethod
     async def update(self, channel: Channel) -> Channel:
-        """Update channel."""
-        pass
+        """Update existing channel."""
+        ...
+    
+    @abstractmethod
+    async def delete(self, channel_id: UUID) -> None:
+        """Soft-delete channel."""
+        ...

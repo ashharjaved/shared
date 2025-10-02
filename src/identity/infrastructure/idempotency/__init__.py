@@ -2,6 +2,6 @@
 """
 Idempotency Infrastructure
 """
-from .idempotency_manager import IdempotencyManager, IdempotencyKey
+from .idempotency_manager import IdempotencyManager
 
-__all__ = ["IdempotencyManager", "IdempotencyKey"]
+__all__ = ["IdempotencyManager"]

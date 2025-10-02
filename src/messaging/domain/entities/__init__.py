@@ -3,10 +3,13 @@
 WhatsApp Domain Entities
 """
 from .channel import Channel
-from .message import InboundMessage,OutboundMessage
+from .inbound_message import InboundMessage
+from .outbound_message import OutboundMessage
+from .message_template import MessageTemplate
 
 __all__ = [
     "InboundMessage",
     "OutboundMessage",
-    "Channel"
+    "Channel",
+    "MessageTemplate"
 ]

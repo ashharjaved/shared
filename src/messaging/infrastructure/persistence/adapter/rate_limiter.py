@@ -1,8 +1,10 @@
 """Rate limiter implementation using Redis."""
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, time
+from uuid import UUID
 
+from messaging.domain.exceptions import RateLimitExceededError
 from shared.infrastructure.cache.redis_cache import RedisCache
 from src.messaging.domain.protocols import RateLimiter
 from shared.infrastructure.observability.logger import get_logger
@@ -96,3 +98,69 @@ class TokenBucketRateLimiter(RateLimiter):
         bucket_key = f"rate_limit:token_bucket:{key}"
         current = await self.redis.get(bucket_key)
         return int(current) if current else 0
+        
+    async def check_and_consume(
+        self,
+        channel_id: UUID,
+        rate_limit: int = 80,
+        window_seconds: int = 1,
+        tokens: int = 1
+    ) -> None:
+        """
+        Check rate limit and consume tokens.
+        
+        Args:
+            channel_id: Channel UUID
+            rate_limit: Max tokens per window
+            window_seconds: Window size in seconds
+            tokens: Tokens to consume
+        
+        Raises:
+            RateLimitExceededError: If rate limit exceeded
+        """
+        key = f"rate_limit:channel:{channel_id}"
+        
+        # Token bucket algorithm
+        now = datetime.utcnow().timestamp()
+        
+        # Get current bucket state
+        bucket_data = await self.redis.get(key)
+        
+        if bucket_data:
+            bucket = eval(bucket_data)  # In production: use JSON
+            last_refill = bucket["last_refill"]
+            tokens_available = bucket["tokens"]
+        else:
+            last_refill = now
+            tokens_available = rate_limit
+        
+        # Refill tokens based on time elapsed
+        elapsed = now - last_refill
+        refill_amount = (elapsed / window_seconds) * rate_limit
+        tokens_available = min(rate_limit, tokens_available + refill_amount)
+        
+        # Check if enough tokens
+        if tokens_available < tokens:
+            logger.warning(
+                f"Rate limit exceeded for channel {channel_id}",
+                extra={"available": tokens_available, "requested": tokens}
+            )
+            raise RateLimitExceededError(
+                f"Rate limit exceeded. Available: {tokens_available:.2f}, Requested: {tokens}"
+            )
+        
+        # Consume tokens
+        tokens_available -= tokens
+        
+        # Update bucket
+        bucket = {
+            "tokens": tokens_available,
+            "last_refill": now
+        }
+        
+        await self.redis.set(key, str(bucket), ttl=window_seconds * 2)
+        
+        logger.debug(
+            f"Rate limit check passed for channel {channel_id}",
+            extra={"tokens_remaining": tokens_available}
+        )

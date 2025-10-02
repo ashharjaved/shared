@@ -1,22 +1,22 @@
-# src/modules/whatsapp/infrastructure/idempotency/idempotency_manager.py
 """
-Idempotency Key Manager
-Prevents duplicate message processing and sending
+Idempotency Manager
+Handles idempotency key checking and result storage
 """
-from dataclasses import dataclass
+from __future__ import annotations
+
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, and_, Column, String, DateTime, Index, text
+import json
+from sqlalchemy import Column, DateTime, String, select, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Mapped, mapped_column
 
-from src.shared.infrastructure.database.base_model import Base
-from src.shared.infrastructure.database.rls import enforce_rls
-from src.shared.infrastructure.observability.logger import get_logger
-from src.modules.whatsapp.domain.exceptions import WhatsAppDomainError
-
+from shared.infrastructure.database import Base
+from shared.infrastructure.database.rls import RLSManager
+from shared.infrastructure.observability.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -25,252 +25,256 @@ class IdempotencyKeyModel(Base):
     """
     ORM model for idempotency keys.
     
-    Table: whatsapp.idempotency_keys
-    Ensures exactly-once processing of requests.
+    Stores request results to prevent duplicate processing.
+    Composite key: (organization_id, endpoint, key)
     """
     
     __tablename__ = "idempotency_keys"
-    __table_args__ = (
-        Index(
-            "idx_idempotency_tenant_endpoint_key",
-            "tenant_id",
-            "endpoint",
-            "key",
-            unique=True,
-        ),
-        Index(
-            "idx_idempotency_expires_at",
-            "expires_at",
-        ),
-        {"schema": "whatsapp"},
-    )
+    __table_args__ = {"schema": "identity"}
     
-    id = Column(
+    # Primary key
+    id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
     
-    tenant_id = Column(
+    # Composite unique key
+    organization_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
         nullable=False,
+        index=True,
     )
+    endpoint: Mapped[str] = mapped_column(String(255), nullable=False)
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
     
-    endpoint = Column(
-        String(255),
-        nullable=False,
-        comment="API endpoint or operation name",
-    )
+    # Result storage
+    result_data: Mapped[str | None] = mapped_column(Text, nullable=True)
+    http_status: Mapped[int | None] = mapped_column(nullable=True)
     
-    key = Column(
-        String(255),
-        nullable=False,
-        comment="Client-provided idempotency key",
-    )
-    
-    result_data = Column(
-        Text,
-        nullable=True,
-        comment="Cached response for replay",
-    )
-    
-    created_at = Column(
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=text("CURRENT_TIMESTAMP"),
+        server_default=text("NOW()"),
     )
-    
-    expires_at = Column(
+    expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        comment="Key expiry (default 24 hours)",
     )
+    
+    def __repr__(self) -> str:
+        return (
+            f"<IdempotencyKey("
+            f"org={self.organization_id}, "
+            f"endpoint={self.endpoint}, "
+            f"key={self.key})>"
+        )
 
 
-@dataclass
-class IdempotencyKey:
-    """Idempotency key data."""
-    tenant_id: UUID
-    endpoint: str
-    key: str
-    result_data: Optional[str] = None
-    created_at: Optional[datetime] = None
-    expires_at: Optional[datetime] = None
+class IdempotencyConflictError(Exception):
+    """Raised when idempotency key already exists with different result."""
+    
+    def __init__(
+        self,
+        organization_id: UUID,
+        endpoint: str,
+        key: str,
+        existing_result: str | None = None,
+    ):
+        self.organization_id = organization_id
+        self.endpoint = endpoint
+        self.key = key
+        self.existing_result = existing_result
+        super().__init__(
+            f"Idempotency conflict for key: {key} on endpoint: {endpoint}"
+        )
 
 
 class IdempotencyManager:
     """
-    Manages idempotency keys for duplicate request prevention.
+    Manages idempotency keys to prevent duplicate request processing.
     
-    Usage:
-        manager = IdempotencyManager(session)
-        
-        # Check if request already processed
-        existing = await manager.get_or_create(
-            tenant_id=tenant_id,
-            endpoint="send_message",
-            key=client_idempotency_key,
-            ttl_hours=24
-        )
-        
-        if existing.result_data:
-            # Already processed, return cached result
-            return existing.result_data
-        
-        # Process request...
-        result = await send_message(...)
-        
-        # Store result
-        await manager.store_result(existing, result)
+    Enforces composite key: (organization_id, endpoint, key)
+    Default expiry: 24 hours
     """
     
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession):
         """
         Initialize idempotency manager.
         
         Args:
-            session: Database session
+            session: Active database session with RLS context set
         """
         self.session = session
     
-    async def get_or_create(
+    async def check_idempotency(
         self,
-        tenant_id: UUID,
+        organization_id: UUID,
         endpoint: str,
         key: str,
-        ttl_hours: int = 24,
-    ) -> IdempotencyKey:
+    ) -> IdempotencyKeyModel | None:
         """
-        Get existing idempotency key or create new one.
+        Check if idempotency key already exists.
         
         Args:
-            tenant_id: Tenant UUID
-            endpoint: Operation identifier
-            key: Idempotency key
-            ttl_hours: Time-to-live in hours
+            organization_id: Organization UUID
+            endpoint: API endpoint path
+            key: Unique idempotency key
             
         Returns:
-            IdempotencyKey instance
+            Existing IdempotencyKeyModel if found, None otherwise
         """
-        await enforce_rls(self.session, tenant_id)
+        # Set RLS context
+        await RLSManager.set_tenant_context(
+            session=self.session,
+            organization_id=organization_id,
+        )
         
-        # Try to get existing
         stmt = select(IdempotencyKeyModel).where(
-            and_(
-                IdempotencyKeyModel.tenant_id == tenant_id,
-                IdempotencyKeyModel.endpoint == endpoint,
-                IdempotencyKeyModel.key == key,
-                IdempotencyKeyModel.expires_at > datetime.utcnow(),
-            )
+            IdempotencyKeyModel.organization_id == organization_id,
+            IdempotencyKeyModel.endpoint == endpoint,
+            IdempotencyKeyModel.key == key,
+            IdempotencyKeyModel.expires_at > datetime.utcnow(),
         )
         
         result = await self.session.execute(stmt)
-        model = result.scalar_one_or_none()
+        existing = result.scalar_one_or_none()
         
-        if model:
+        if existing:
             logger.info(
-                "Found existing idempotency key",
+                "Idempotency key found",
                 extra={
-                    "tenant_id": str(tenant_id),
+                    "organization_id": str(organization_id),
                     "endpoint": endpoint,
                     "key": key,
+                    "created_at": existing.created_at.isoformat(),
                 },
             )
+        
+        return existing
+    
+    async def store_idempotency_result(
+        self,
+        organization_id: UUID,
+        endpoint: str,
+        key: str,
+        result_data: dict[str, Any],
+        http_status: int = 200,
+        ttl_hours: int = 24,
+    ) -> IdempotencyKeyModel:
+        """
+        Store result for idempotency key.
+        
+        Args:
+            organization_id: Organization UUID
+            endpoint: API endpoint path
+            key: Unique idempotency key
+            result_data: Response data to store
+            http_status: HTTP status code of response
+            ttl_hours: Time-to-live in hours (default: 24)
             
-            return IdempotencyKey(
-                tenant_id=model.tenant_id,
-                endpoint=model.endpoint,
-                key=model.key,
-                result_data=model.result_data,
-                created_at=model.created_at,
-                expires_at=model.expires_at,
+        Returns:
+            Created IdempotencyKeyModel
+            
+        Raises:
+            IdempotencyConflictError: If key already exists
+        """
+        # Set RLS context
+        await RLSManager.set_tenant_context(
+            session=self.session,
+            organization_id=organization_id,
+        )
+        
+        # Check if already exists
+        existing = await self.check_idempotency(organization_id, endpoint, key)
+        if existing:
+            raise IdempotencyConflictError(
+                organization_id=organization_id,
+                endpoint=endpoint,
+                key=key,
+                existing_result=existing.result_data,
             )
         
-        # Create new
+        # Create new idempotency record
         expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
         
-        new_model = IdempotencyKeyModel(
-            tenant_id=tenant_id,
+        idempotency_record = IdempotencyKeyModel(
+            organization_id=organization_id,
             endpoint=endpoint,
             key=key,
+            result_data=json.dumps(result_data),
+            http_status=http_status,
             expires_at=expires_at,
         )
         
-        self.session.add(new_model)
+        self.session.add(idempotency_record)
         await self.session.flush()
         
         logger.info(
-            "Created new idempotency key",
+            "Idempotency key stored",
             extra={
-                "tenant_id": str(tenant_id),
+                "organization_id": str(organization_id),
                 "endpoint": endpoint,
                 "key": key,
                 "expires_at": expires_at.isoformat(),
             },
         )
         
-        return IdempotencyKey(
-            tenant_id=tenant_id,
-            endpoint=endpoint,
-            key=key,
-            created_at=new_model.created_at,
-            expires_at=expires_at,
-        )
+        return idempotency_record
     
-    async def store_result(
+    async def get_cached_result(
         self,
-        idempotency_key: IdempotencyKey,
-        result_data: str,
-    ) -> None:
+        organization_id: UUID,
+        endpoint: str,
+        key: str,
+    ) -> tuple[dict[str, Any] | None, int | None]:
         """
-        Store operation result for future replay.
+        Get cached result for idempotency key.
         
         Args:
-            idempotency_key: Key to update
-            result_data: Serialized result
+            organization_id: Organization UUID
+            endpoint: API endpoint path
+            key: Unique idempotency key
+            
+        Returns:
+            Tuple of (result_data, http_status) or (None, None) if not found
         """
-        await enforce_rls(self.session, idempotency_key.tenant_id)
+        existing = await self.check_idempotency(organization_id, endpoint, key)
         
-        stmt = select(IdempotencyKeyModel).where(
-            and_(
-                IdempotencyKeyModel.tenant_id == idempotency_key.tenant_id,
-                IdempotencyKeyModel.endpoint == idempotency_key.endpoint,
-                IdempotencyKeyModel.key == idempotency_key.key,
-            )
+        if not existing:
+            return None, None
+        
+        if existing.result_data:
+            result_data = json.loads(existing.result_data)
+        else:
+            result_data = None
+        
+        return result_data, existing.http_status
+    
+    async def cleanup_expired_keys(self) -> int:
+        """
+        Clean up expired idempotency keys.
+        
+        Should be run periodically via background job.
+        
+        Returns:
+            Number of deleted records
+        """
+        from sqlalchemy import delete
+        
+        stmt = delete(IdempotencyKeyModel).where(
+            IdempotencyKeyModel.expires_at <= datetime.utcnow()
         )
         
         result = await self.session.execute(stmt)
-        model = result.scalar_one_or_none()
+        await self.session.commit()
         
-        if model:
-            model.result_data = result_data
-            await self.session.flush()
-            
-            logger.info(
-                "Stored idempotency result",
-                extra={
-                    "tenant_id": str(idempotency_key.tenant_id),
-                    "endpoint": idempotency_key.endpoint,
-                    "key": idempotency_key.key,
-                },
-            )
-    
-    async def cleanup_expired(self) -> int:
-        """
-        Remove expired idempotency keys.
+        deleted_count = result.rowcount
         
-        Returns:
-            Number of keys deleted
-        """
-        # This should be called by a periodic cleanup job
-        stmt = text("""
-            DELETE FROM whatsapp.idempotency_keys
-            WHERE expires_at < NOW()
-        """)
+        logger.info(
+            "Cleaned up expired idempotency keys",
+            extra={"deleted_count": deleted_count},
+        )
         
-        result = await self.session.execute(stmt)
-        count = result.rowcount
-        
-        logger.info(f"Cleaned up {count} expired idempotency keys")
-        
-        return count
+        return deleted_count

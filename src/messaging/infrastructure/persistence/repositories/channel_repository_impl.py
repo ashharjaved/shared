@@ -1,193 +1,311 @@
-# =============================================================================
-# FILE: src/modules/whatsapp/infrastructure/persistence/repositories/channel_repository_impl.py
-# =============================================================================
+# src/messaging/infrastructure/persistence/repositories/channel_repository_impl.py
 """
-SQLAlchemy Implementation of Channel Repository
-Maps between Channel domain entity and ChannelModel ORM
+SQLAlchemy Implementation of ChannelRepository
+Extends generic SQLAlchemyRepository base class
 """
-from __future__ import annotations
-
-from typing import List, Optional
+from typing import Optional, List
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from messaging.domain.protocols.channel_repository import ChannelRepository
-from messaging.infrastructure.persistence.models.whatsapp_account_model import WhatsAppAccountModel
-from shared.infrastructure.database import SQLAlchemyRepository
-from shared.infrastructure.observability import get_logger
-from shared.infrastructure.security import get_encryption_manager
-
 from src.messaging.domain.entities.channel import Channel
-from src.messaging.domain.value_objects.message_content import (
-    AccessToken,
-    ChannelStatus,
-    RateLimitTier,
-    WhatsAppBusinessAccountId,
-)
-from src.messaging.domain.value_objects.phone_number import PhoneNumber
-#from src.messaging.infrastructure.persistence.models. import ChannelModel
+from src.messaging.domain.protocols.channel_repository import ChannelRepository
+from src.messaging.infrastructure.persistence.models.channel_model import ChannelModel
+from shared.infrastructure.database.sqlalchemy_repository import SQLAlchemyRepository
+from shared.infrastructure.database.rls import RLSManager
+from shared.infrastructure.observability.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-class SQLAlchemyChannelRepository(SQLAlchemyRepository[Channel, WhatsAppAccountModel],ChannelRepository):
+class ChannelRepositoryImpl(SQLAlchemyRepository[Channel, ChannelModel], ChannelRepository):
     """
     SQLAlchemy implementation of ChannelRepository.
     
-    Handles:
-    - Entity ↔ Model mapping
-    - Encryption/decryption of access tokens
-    - RLS enforcement (via session context)
-    - Query optimization
+    Inherits CRUD operations from SQLAlchemyRepository and implements
+    domain-specific channel queries with RLS enforcement.
     """
     
-    def __init__(self, session: AsyncSession, encryption: FieldEncryption):
-        super().__init__(session, WhatsAppAccountModel)
-        self.encryption = encryption
-    
-    def _to_domain(self, model: WhatsAppAccountModel) -> Channel:
-        """Convert ORM model to domain entity."""
-        return Channel(
-            id=model.id,
-            organization_id=model.organization_id,
-            phone_number=PhoneNumber(
-                display_number=model.display_phone_number,
-                phone_number_id=model.phone_number_id
-            ),
-            business_account_id=WhatsAppBusinessAccountId(model.business_account_id),
-            access_token=AccessToken(
-                self.encryption.decrypt(model.access_token_encrypted)
-            ),
-            webhook_verify_token=self.encryption.decrypt(
-                model.webhook_verify_token_encrypted
-            ),
-            status=ChannelStatus(model.status),
-            rate_limit_tier=RateLimitTier(model.rate_limit_tier),
-            metadata=model.metadata or {},
-            created_at=model.created_at,
-            updated_at=model.updated_at
+    def __init__(self, session: AsyncSession, tenant_id: UUID):
+        """
+        Initialize channel repository with session and tenant context.
+        
+        Args:
+            session: Active async database session
+            tenant_id: Tenant UUID for RLS enforcement
+        """
+        super().__init__(
+            session=session,
+            model_class=ChannelModel,
+            entity_class=Channel
         )
+        self.tenant_id = tenant_id
     
-    def _to_model(self, entity: Channel) -> WhatsAppAccountModel:
-        """Convert domain entity to ORM model."""
-        return WhatsAppAccountModel(
-            id=entity.id,
-            organization_id=entity.organization_id,
-            phone_number_id=entity.phone_number.phone_number_id,
-            display_phone_number=entity.phone_number.display_number,
-            business_account_id=entity.business_account_id.value,
-            access_token_encrypted=self.encryption.encrypt(entity.access_token.value),
-            webhook_verify_token_encrypted=self.encryption.encrypt(entity.webhook_verify_token),
-            status=entity.status.value,
-            rate_limit_tier=entity.rate_limit_tier.value,
-            metadata=entity.metadata,
-            created_at=entity.created_at,
-            updated_at=entity.updated_at
-        )
+    # ========================================================================
+    # DOMAIN-SPECIFIC QUERIES
+    # ========================================================================
     
-    async def get_by_phone_number_id(
-        self,
+    async def get_by_tenant_and_phone(
+        self, 
+        tenant_id: UUID, 
         phone_number_id: str
     ) -> Optional[Channel]:
         """
-        Get channel by WhatsApp phone number ID.
+        Find channel by tenant and phone number ID.
         
         Args:
-            phone_number_id: WhatsApp Business API phone number ID
+            tenant_id: Organization UUID
+            phone_number_id: WhatsApp phone number ID
             
         Returns:
-            Channel if found, None otherwise
+            Channel entity if found, None otherwise
         """
+        await RLSManager.set_tenant_context(self.session, tenant_id)
+        
         try:
-            stmt = select(WhatsAppAccountModel).where(
-                WhatsAppAccountModel.phone_number_id == phone_number_id
+            stmt = select(ChannelModel).where(
+                ChannelModel.tenant_id == tenant_id,
+                ChannelModel.phone_number_id == phone_number_id
             )
             result = await self.session.execute(stmt)
             model = result.scalar_one_or_none()
             
-            if model is None:
+            if model:
                 logger.debug(
-                    "Channel not found by phone_number_id",
-                    extra={"phone_number_id": phone_number_id}
+                    "Channel found by phone number",
+                    extra={
+                        "tenant_id": str(tenant_id),
+                        "phone_number_id": phone_number_id,
+                        "channel_id": str(model.id)
+                    }
                 )
-                return None
             
-            return self._to_entity(model)
-        
+            return self._to_entity(model) if model else None
+            
         except Exception as e:
             logger.error(
-                "Failed to get channel by phone_number_id",
-                extra={"error": str(e), "phone_number_id": phone_number_id}
+                "Failed to get channel by phone number",
+                extra={
+                    "error": str(e),
+                    "tenant_id": str(tenant_id),
+                    "phone_number_id": phone_number_id
+                }
             )
             raise
     
-    async def get_by_organization(
-        self,
-        organization_id: UUID
-    ) -> List[Channel]:
+    async def list_by_tenant(self, tenant_id: UUID) -> List[Channel]:
         """
-        Get all channels for an organization (tenant).
-        
-        Note: RLS automatically filters by tenant_id from session context.
-        This method adds additional organization_id filter if needed.
+        List all channels for a tenant.
         
         Args:
-            organization_id: Organization/tenant UUID
+            tenant_id: Organization UUID
             
         Returns:
-            List of channels for the organization
+            List of channel entities
         """
+        await RLSManager.set_tenant_context(self.session, tenant_id)
+        
         try:
-            stmt = (
-                select(WhatsAppAccountModel)
-                .where(WhatsAppAccountModel.organization_id == organization_id)
-                .where(WhatsAppAccountModel.status != ChannelStatus.DELETED.value)
-                .order_by(WhatsAppAccountModel.created_at.desc())
+            # Use inherited find_all with filters
+            channels = await self.find_all(
+                tenant_id=tenant_id,
+                order_by="created_at"
             )
-            
-            result = await self.session.execute(stmt)
-            models = result.scalars().all()
-            
-            channels = [self._to_entity(model) for model in models]
             
             logger.debug(
-                f"Retrieved {len(channels)} channels for organization",
-                extra={"organization_id": str(organization_id)}
+                "Listed channels for tenant",
+                extra={
+                    "tenant_id": str(tenant_id),
+                    "count": len(channels)
+                }
             )
             
-            return channels
-        
+            return list(channels)
+            
         except Exception as e:
             logger.error(
-                "Failed to get channels by organization",
-                extra={"error": str(e), "organization_id": str(organization_id)}
+                "Failed to list channels for tenant",
+                extra={"error": str(e), "tenant_id": str(tenant_id)}
             )
             raise
     
-    async def get_active_channels(self) -> List[Channel]:
+    async def get_active_channels(self, tenant_id: UUID) -> List[Channel]:
         """
-        Get all active channels (for current tenant via RLS).
+        Get all active channels for a tenant.
         
+        Args:
+            tenant_id: Organization UUID
+            
         Returns:
-            List of active channels
+            List of active channel entities
         """
+        await RLSManager.set_tenant_context(self.session, tenant_id)
+        
         try:
-            stmt = (
-                select(WhatsAppAccountModel)
-                .where(WhatsAppAccountModel.status == ChannelStatus.ACTIVE.value)                
-                .order_by(WhatsAppAccountModel.created_at.desc())
+            # Use inherited find_all with status filter
+            channels = await self.find_all(
+                tenant_id=tenant_id,
+                status="active",
+                order_by="created_at"
             )
             
-            result = await self.session.execute(stmt)
-            models = result.scalars().all()
+            logger.debug(
+                "Listed active channels",
+                extra={
+                    "tenant_id": str(tenant_id),
+                    "count": len(channels)
+                }
+            )
             
-            return [self._to_entity(model) for model in models]
-        
+            return list(channels)
+            
         except Exception as e:
             logger.error(
                 "Failed to get active channels",
-                extra={"error": str(e)}
+                extra={"error": str(e), "tenant_id": str(tenant_id)}
             )
             raise
+    
+    # ========================================================================
+    # OVERRIDE METHODS WITH RLS ENFORCEMENT
+    # ========================================================================
+    
+    async def get_by_id(self, channel_id: UUID) -> Optional[Channel]:
+        """
+        Retrieve channel by ID with RLS enforcement.
+        
+        Args:
+            channel_id: Channel UUID
+            
+        Returns:
+            Channel entity if found, None otherwise
+        """
+        await RLSManager.set_tenant_context(self.session, self.tenant_id)
+        return await super().get_by_id(channel_id)
+    
+    async def add(self, entity: Channel) -> Channel:
+        """
+        Add new channel with RLS enforcement.
+        
+        Args:
+            entity: Channel entity to persist
+            
+        Returns:
+            Persisted channel entity
+        """
+        await RLSManager.set_tenant_context(self.session, entity.tenant_id)
+        return await super().add(entity)
+    
+    async def update(self, entity: Channel) -> Channel:
+        """
+        Update channel with RLS enforcement.
+        
+        Args:
+            entity: Channel entity with updated values
+            
+        Returns:
+            Updated channel entity
+        """
+        await RLSManager.set_tenant_context(self.session, entity.tenant_id)
+        return await super().update(entity)
+    
+    async def delete(self, channel_id: UUID) -> bool:
+        """
+        Soft-delete channel by marking status as deleted.
+        
+        Args:
+            channel_id: Channel UUID
+            
+        Returns:
+            True if deleted, False if not found
+        """
+        await RLSManager.set_tenant_context(self.session, self.tenant_id)
+        
+        try:
+            # Find the channel first
+            channel = await self.get_by_id(channel_id)
+            if not channel:
+                return False
+            
+            # Update status to deleted instead of hard delete
+            channel.status = "deleted"
+            await self.update(channel)
+            
+            logger.debug(
+                "Channel soft-deleted",
+                extra={
+                    "channel_id": str(channel_id),
+                    "tenant_id": str(self.tenant_id)
+                }
+            )
+            
+            return True
+            
+        except Exception as e:
+            logger.error(
+                "Failed to delete channel",
+                extra={
+                    "error": str(e),
+                    "channel_id": str(channel_id)
+                }
+            )
+            raise
+    
+    # ========================================================================
+    # ENTITY <-> MODEL MAPPING
+    # ========================================================================
+    
+    def _to_entity(self, model: ChannelModel) -> Channel:
+        """
+        Convert ORM model to domain entity.
+        
+        Args:
+            model: ChannelModel ORM instance
+            
+        Returns:
+            Channel domain entity
+        """
+        return Channel(
+            id=model.id,
+            tenant_id=model.tenant_id,
+            name=model.name,
+            phone_number_id=model.phone_number_id,
+            business_phone=model.business_phone,
+            waba_id=model.waba_id,
+            access_token_encrypted=model.access_token_encrypted,
+            status=model.status,
+            rate_limit_per_second=model.rate_limit_per_second,
+            monthly_message_limit=model.monthly_message_limit,
+            webhook_verify_token=model.webhook_verify_token,
+            metadata=model.metadata or {},
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+    
+    def _to_model(self, entity: Channel) -> ChannelModel:
+        """
+        Convert domain entity to ORM model.
+        
+        Args:
+            entity: Channel domain entity
+            
+        Returns:
+            ChannelModel ORM instance
+        """
+        return ChannelModel(
+            id=entity.id,
+            tenant_id=entity.tenant_id,
+            name=entity.name,
+            phone_number_id=entity.phone_number_id,
+            business_phone=entity.business_phone,
+            waba_id=entity.waba_id,
+            access_token_encrypted=entity.access_token_encrypted,
+            status=entity.status,
+            rate_limit_per_second=entity.rate_limit_per_second,
+            monthly_message_limit=entity.monthly_message_limit,
+            webhook_verify_token=entity.webhook_verify_token,
+            metadata=entity.metadata,
+            created_at=entity.created_at,
+            updated_at=entity.updated_at,
+        )

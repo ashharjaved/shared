@@ -1,48 +1,63 @@
-from abc import ABC, abstractmethod
-from typing import List, Optional
+"""
+Message Repository Protocol
+Defines persistence interfaces for inbound/outbound messages.
+"""
+from abc import abstractmethod
+from typing import Optional, List, Protocol
 from uuid import UUID
-from messaging.domain.entities.message import InboundMessage, OutboundMessage
+from datetime import datetime
+
+from src.messaging.domain.entities.inbound_message import InboundMessage
+from src.messaging.domain.entities.outbound_message import OutboundMessage
 
 
-class MessageRepository(ABC):
-    """Repository interface for messages."""
+class InboundMessageRepository(Protocol):
+    """Repository protocol for InboundMessage."""
     
     @abstractmethod
-    async def save_inbound(self, message: InboundMessage) -> InboundMessage:
-        """Save inbound message."""
-        pass
+    async def get_by_id(self, message_id: UUID) -> Optional[InboundMessage]:
+        """Retrieve inbound message by ID."""
+        ...
     
     @abstractmethod
-    async def save_outbound(self, message: OutboundMessage) -> OutboundMessage:
-        """Save outbound message."""
-        pass
+    async def get_by_wa_message_id(self, wa_message_id: str) -> Optional[InboundMessage]:
+        """Find message by WhatsApp message ID (idempotency)."""
+        ...
     
     @abstractmethod
-    async def get_inbound_by_wa_id(self, wa_message_id: str) -> Optional[InboundMessage]:
-        """Get inbound message by WhatsApp ID."""
-        pass
+    async def create(self, message: InboundMessage) -> InboundMessage:
+        """Persist new inbound message."""
+        ...
     
     @abstractmethod
-    async def get_outbound_by_id(self, message_id: UUID) -> Optional[OutboundMessage]:
-        """Get outbound message by ID."""
-        pass
+    async def list_by_channel(
+        self, channel_id: UUID, limit: int = 100
+    ) -> List[InboundMessage]:
+        """List recent inbound messages for a channel."""
+        ...
+
+
+class OutboundMessageRepository(Protocol):
+    """Repository protocol for OutboundMessage."""
     
     @abstractmethod
-    async def get_outbound_by_wa_id(self, wa_message_id: str) -> Optional[OutboundMessage]:
-        """Get outbound message by WhatsApp ID."""
-        pass
+    async def get_by_id(self, message_id: UUID) -> Optional[OutboundMessage]:
+        """Retrieve outbound message by ID."""
+        ...
     
     @abstractmethod
-    async def get_outbound_by_idempotency_key(self, key: str) -> Optional[OutboundMessage]:
-        """Get outbound message by idempotency key."""
-        pass
+    async def create(self, message: OutboundMessage) -> OutboundMessage:
+        """Persist new outbound message."""
+        ...
     
     @abstractmethod
-    async def update_outbound(self, message: OutboundMessage) -> OutboundMessage:
-        """Update outbound message."""
-        pass
+    async def update(self, message: OutboundMessage) -> OutboundMessage:
+        """Update outbound message status."""
+        ...
     
     @abstractmethod
-    async def get_failed_for_retry(self, limit: int = 100) -> List[OutboundMessage]:
-        """Get failed messages eligible for retry."""
-        pass
+    async def list_queued(
+        self, channel_id: UUID, limit: int = 100
+    ) -> List[OutboundMessage]:
+        """List queued messages for a channel."""
+        ...

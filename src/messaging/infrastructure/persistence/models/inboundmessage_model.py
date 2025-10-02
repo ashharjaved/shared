@@ -1,54 +1,61 @@
-"""Inbound Message ORM Model"""
+"""
+SQLAlchemy ORM Model for InboundMessage
+"""
 from __future__ import annotations
 
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Index, JSON, String
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from messaging.infrastructure.persistence.models.channel_model import ChannelModel
 from shared.infrastructure.database.base_model import Base
 
 
 class InboundMessageModel(Base):
-    """
-    Inbound WhatsApp message ORM model.
-    
-    Stores all incoming messages from WhatsApp webhook.
-    Supports text, image, video, document, audio, location, and contacts.
-    """
+    """ORM model for whatsapp.inbound_messages table (partitioned by month)."""
     
     __tablename__ = "inbound_messages"
     __table_args__ = (
-        UniqueConstraint("wa_message_id", name="uq_inbound_messages_wa_message_id"),
-        Index("idx_inbound_account_time", "account_id", "timestamp"),
-        Index("idx_inbound_from_phone", "from_phone"),
-        Index("idx_inbound_wa_msg_id", "wa_message_id"),
-        Index("idx_inbound_status", "status"),
+        Index("idx_inbound_wa_message_id", "wa_message_id"),
+        Index("idx_inbound_channel_tenant", "channel_id", "tenant_id"),
+        Index("idx_inbound_processed", "processed"),
         {"schema": "whatsapp"}
     )
     
-    # Primary key inherited from Base (id, created_at, updated_at)
-    
-    account_id: Mapped[UUID] = mapped_column(
+    # Override base id
+    id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
-        ForeignKey("whatsapp.accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    
+    tenant_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("identity.tenants.id"),
+        nullable=False,
+    )
+    
+    channel_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("whatsapp.channels.id"),
         nullable=False,
     )
     
     wa_message_id: Mapped[str] = mapped_column(
         String(100),
-        unique=True,
         nullable=False,
+        unique=True,
     )
     
-    from_phone: Mapped[str] = mapped_column(
+    from_number: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
     )
     
-    to_phone: Mapped[str] = mapped_column(
+    to_number: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
     )
@@ -63,31 +70,31 @@ class InboundMessageModel(Base):
         nullable=False,
     )
     
-    timestamp: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+    timestamp_wa: Mapped[datetime] = mapped_column(
         nullable=False,
     )
     
-    context: Mapped[dict | None] = mapped_column(
+    raw_payload: Mapped[dict] = mapped_column(
         JSON,
-        nullable=True,
-    )
-    
-    status: Mapped[str] = mapped_column(
-        String(20),
-        default="received",
         nullable=False,
     )
     
-    processed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
+    processed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
     )
     
-    error_message: Mapped[str | None] = mapped_column(
-        String,
-        nullable=True,
+    # Override created_at and updated_at
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False,
     )
     
-    def __repr__(self) -> str:
-        return f"<InboundMessageModel(id={self.id}, wa_id={self.wa_message_id})>"
+    updated_at: Mapped[datetime] = mapped_column(
+        nullable=False,
+    )
+    
+    # Relationships
+    channel: Mapped[ChannelModel] = relationship(
+        back_populates="inbound_messages",
+    )

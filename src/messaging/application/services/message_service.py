@@ -11,16 +11,15 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.messaging.domain.entities.message import Message, MessageDirection, MessageType, MessageStatus
-from src.messaging.domain.entities.template import MessageTemplate
+from messaging.domain.entities.message_template import MessageTemplate
 from src.messaging.domain.value_objects.phone_number import PhoneNumber
-from src.messaging.domain.interfaces.repositories import (
-    MessageRepository, ChannelRepository, TemplateRepository
+from src.messaging.domain.protocols import (
+    InboundMessageRepository, ChannelRepository, TemplateRepository,message_repository
 )
 from messaging.domain.protocols.external_services import (
-    WhatsAppClient, WhatsAppMessageRequest, WhatsAppMessageResponse
+    WhatsAppMessageRequest
 )
 from src.messaging.infrastructure.rate_limiter.token_bucket import TokenBucketRateLimiter
-from src.messaging.domain.events.message_events import MessageSent, MessageFailed
 from src.messaging.infrastructure.events.event_bus import EventBus
 from src.messaging.infrastructure.outbox.outbox_service import OutboxService
 
@@ -67,7 +66,7 @@ class MessageService:
             phone = PhoneNumber(to_number)
             
             # Get channel
-            channel = await self.channel_repo.get_by_id(channel_id, tenant_id)
+            channel = await self.channel_repo.get_by_id(channel_id)
             if not channel:
                 raise ValueError(f"Channel {channel_id} not found")
             
@@ -112,7 +111,7 @@ class MessageService:
             # If template message, validate and prepare
             template = None
             if template_name and not within_session:
-                template = await self.template_repo.get_by_name(
+                template = await self.template_repo..get_by_name(
                     template_name,
                     channel_id,
                     tenant_id
@@ -178,7 +177,7 @@ class MessageService:
                 return
             
             # Get channel
-            channel = await self.channel_repo.get_by_id(message.channel_id, tenant_id)
+            channel = await self.channel_repo.get_by_id(message.channel_id)
             if not channel:
                 logger.error(f"Channel {message.channel_id} not found")
                 return

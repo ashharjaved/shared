@@ -1,240 +1,199 @@
-"""Channel management service."""
+"""
+Channel Service
+Business logic for channel management.
+"""
+from typing import List, Optional
+from uuid import UUID, uuid4
 
-import logging
-from typing import Any, Dict, List, Optional
-import uuid
-import secrets
+from shared.infrastructure.security.field_encryption import decrypt_field_value, encrypt_field_value
+from src.messaging.domain.entities.channel import Channel
+from src.messaging.domain.protocols.channel_repository import ChannelRepository
+from src.messaging.domain.exceptions import ChannelNotFoundError, ChannelInactiveError
+#from shared.infrastructure.security.encryption import encrypt_field, decrypt_field
+from shared.infrastructure.observability.logger import get_logger
+from shared.infrastructure.security.audit_log import AuditLogger
 
-from uuid import UUID
-
-from src.messaging.infrastructure.events.event_bus import EventBus
-from src.messaging.domain.entities.channel import Channel, ChannelStatus
-from src.messaging.domain.interfaces.repositories import ChannelRepository
-from messaging.domain.protocols.external_services import WhatsAppClient, EncryptionService, WhatsAppMessageRequest
-from src.messaging.domain.events.message_events import ChannelActivated
-#from src.shared.infrastructure.events import EventBus
-
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class ChannelService:
-    """Service for managing WhatsApp channels."""
+    """
+    Application service for channel operations.
+    
+    Handles encryption, business rules, and audit logging.
+    """
     
     def __init__(
         self,
-        session: AsyncSession,
         channel_repo: ChannelRepository,
-        whatsapp_client: WhatsAppClient,
-        encryption: EncryptionService,
-        event_bus: EventBus
+        audit_logger: AuditLogger,
+        encryption_key: str
     ):
-        self.session = session
         self.channel_repo = channel_repo
-        self.whatsapp_client = whatsapp_client
-        self.encryption = encryption
-        self.event_bus = event_bus
+        self.audit_logger = audit_logger
+        self.encryption_key = encryption_key
     
     async def create_channel(
         self,
-        tenant_id: uuid.UUID,
+        tenant_id: UUID,
         name: str,
         phone_number_id: str,
         business_phone: str,
+        waba_id: str,
         access_token: str,
-        rate_limit: int = 80,
-        monthly_limit: Optional[int] = None
+        rate_limit_per_second: int = 80,
+        monthly_message_limit: int = 10000,
+        webhook_verify_token: Optional[str] = None,
+        metadata: Optional[dict] = None,
+        user_id: Optional[UUID] = None
     ) -> Channel:
-        """Create and register a new WhatsApp channel."""
-        try:
-            # Validate by sending test message
-            test_response = await self.whatsapp_client.send_message(
-                phone_number_id,
-                access_token,
-                WhatsAppMessageRequest(
-                    to=business_phone,
-                    type="text",
-                    text="Channel verification successful"
-                )
-            )
-            
-            if not test_response.success:
-                raise ValueError(f"Channel verification failed: {test_response.error_message}")
-            
-            # Generate webhook verify token
-            webhook_token = secrets.token_urlsafe(32)
-            
-            # Create channel entity
-            channel = Channel(
-                id=uuid.uuid4(),
-                tenant_id=tenant_id,
-                name=name,
-                phone_number_id=phone_number_id,
-                business_phone=business_phone,
-                access_token=access_token,  # Will be encrypted in repository
-                status=ChannelStatus.ACTIVE,
-                rate_limit_per_second=rate_limit,
-                monthly_message_limit=monthly_limit,
-                webhook_verify_token=webhook_token
-            )
-            
-            # Save channel
-            channel = await self.channel_repo.create(channel)
-            
-            # Publish event
-            event = ChannelActivated(
-                event_id=uuid.uuid4(),
-                aggregate_id=channel.id,
-                tenant_id=tenant_id,
-                occurred_at=channel.created_at,
-                channel_name=name,
-                phone_number=business_phone
-            )
-            await self.event_bus.publish(event)
-            
-            logger.info(f"Channel {channel.id} created for tenant {tenant_id}")
-            
-            return channel
-            
-        except Exception as e:
-            logger.error(f"Failed to create channel: {e}")
-            raise
+        """
+        Create new WhatsApp channel.
+        
+        Encrypts access token before persistence.
+        """
+        # Check for duplicate
+        existing = await self.channel_repo.get_by_tenant_and_phone(
+            tenant_id, phone_number_id
+        )
+        if existing:
+            raise ValueError("Channel with this phone number already exists")
+        
+        # Encrypt access token
+        encrypted_token = encrypt_field_value(access_token)
+        
+        # Create entity
+        channel = Channel(
+            id=uuid4(),
+            tenant_id=tenant_id,
+            name=name,
+            phone_number_id=phone_number_id,
+            business_phone=business_phone,
+            waba_id=waba_id,
+            access_token_encrypted=encrypted_token,
+            rate_limit_per_second=rate_limit_per_second,
+            monthly_message_limit=monthly_message_limit,
+            webhook_verify_token=webhook_verify_token,
+            metadata=metadata or {}
+        )
+        
+        # Persist
+        channel = await self.channel_repo.create(channel)
+        
+        # Audit log
+        await self.audit_logger.log(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            action="channel.created",
+            resource_type="channel",
+            resource_id=channel.id,
+            details={"name": name, "phone": business_phone}
+        )
+        
+        logger.info(
+            f"Channel created: {channel.id}",
+            extra={"tenant_id": tenant_id, "channel_id": channel.id}
+        )
+        
+        return channel
     
-    async def get_channel(
-        self,
-        channel_id: uuid.UUID,
-        tenant_id: uuid.UUID
-    ) -> Optional[Channel]:
-        """Get channel by ID."""
-        return await self.channel_repo.get_by_id(channel_id, tenant_id)
+    async def get_channel(self, channel_id: UUID) -> Channel:
+        """Retrieve channel by ID."""
+        channel = await self.channel_repo.get_by_id(channel_id)
+        
+        if not channel:
+            raise ChannelNotFoundError(f"Channel {channel_id} not found")
+        
+        return channel
     
-    # Add to src/messaging/application/services/channel_service.py
-
-    async def get_channel_stats(
-        self,
-        channel_id: UUID,
-        tenant_id: UUID
-    ) -> Dict[str, Any]:
-        """Get channel statistics."""
-        try:
-            # Use the query handler
-            from src.messaging.application.queries.get_channel_stats_query import (
-                GetChannelStatsQuery, GetChannelStatsQueryHandler
-            )
-            
-            query = GetChannelStatsQuery(
-                tenant_id=tenant_id,
-                channel_id=channel_id,
-                period="today"
-            )
-            
-            handler = GetChannelStatsQueryHandler(self.session)
-            stats = await handler.handle(query)
-            
-            return {
-                "channel_id": channel_id,
-                "messages_sent_today": stats.messages_sent,
-                "messages_received_today": stats.messages_received,
-                "messages_failed_today": stats.messages_failed,
-                "current_month_usage": stats.current_month_usage,
-                "monthly_limit": stats.monthly_limit,
-                "usage_percentage": stats.usage_percentage,
-                "last_message_at": stats.last_message_at
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to get channel stats: {e}")
-            raise
-
-    async def list_channels(
-        self,
-        tenant_id: uuid.UUID
-    ) -> List[Channel]:
-        """List all channels for a tenant."""
+    async def list_channels(self, tenant_id: UUID) -> List[Channel]:
+        """List all channels for tenant."""
         return await self.channel_repo.list_by_tenant(tenant_id)
     
     async def update_channel(
         self,
-        channel_id: uuid.UUID,
-        tenant_id: uuid.UUID,
+        channel_id: UUID,
         name: Optional[str] = None,
-        access_token: Optional[str] = None,
-        rate_limit: Optional[int] = None,
-        monthly_limit: Optional[int] = None
+        rate_limit_per_second: Optional[int] = None,
+        monthly_message_limit: Optional[int] = None,
+        metadata: Optional[dict] = None,
+        user_id: Optional[UUID] = None
     ) -> Channel:
         """Update channel configuration."""
-        try:
-            channel = await self.channel_repo.get_by_id(channel_id, tenant_id)
-            if not channel:
-                raise ValueError(f"Channel {channel_id} not found")
-            
-            # Update fields
-            if name:
-                channel.name = name
-            if access_token:
-                # Validate new token
-                test_response = await self.whatsapp_client.send_message(
-                    channel.phone_number_id,
-                    access_token,
-                    WhatsAppMessageRequest(
-                        to=channel.business_phone,
-                        type="text",
-                        text="Token update verification"
-                    )
-                )
-                if test_response.success:
-                    channel.access_token = access_token
-                else:
-                    raise ValueError(f"Token validation failed: {test_response.error_message}")
-            if rate_limit:
-                channel.rate_limit_per_second = rate_limit
-            if monthly_limit is not None:
-                channel.monthly_message_limit = monthly_limit
-            
-            # Save updates
-            channel = await self.channel_repo.update(channel)
-            
-            logger.info(f"Channel {channel_id} updated")
-            
-            return channel
-            
-        except Exception as e:
-            logger.error(f"Failed to update channel: {e}")
-            raise
+        channel = await self.get_channel(channel_id)
+        
+        # Update fields
+        if name:
+            channel.name = name
+        if rate_limit_per_second:
+            channel.rate_limit_per_second = rate_limit_per_second
+        if monthly_message_limit:
+            channel.monthly_message_limit = monthly_message_limit
+        if metadata:
+            channel.metadata.update(metadata)
+        
+        # Persist
+        channel = await self.channel_repo.update(channel)
+        
+        # Audit log
+        await self.audit_logger.log(
+            tenant_id=channel.tenant_id,
+            user_id=user_id,
+            action="channel.updated",
+            resource_type="channel",
+            resource_id=channel.id,
+            details={"updates": {"name": name, "rate_limit": rate_limit_per_second}}
+        )
+        
+        return channel
     
-    async def deactivate_channel(
-        self,
-        channel_id: uuid.UUID,
-        tenant_id: uuid.UUID
-    ) -> None:
-        """Deactivate a channel."""
-        try:
-            channel = await self.channel_repo.get_by_id(channel_id, tenant_id)
-            if not channel:
-                raise ValueError(f"Channel {channel_id} not found")
-            
-            channel.deactivate()
-            await self.channel_repo.update(channel)
-            
-            logger.info(f"Channel {channel_id} deactivated")
-            
-        except Exception as e:
-            logger.error(f"Failed to deactivate channel: {e}")
-            raise
+    async def activate_channel(
+        self, channel_id: UUID, user_id: Optional[UUID] = None
+    ) -> Channel:
+        """Activate a suspended channel."""
+        channel = await self.get_channel(channel_id)
+        channel.activate()
+        
+        channel = await self.channel_repo.update(channel)
+        
+        await self.audit_logger.log(
+            tenant_id=channel.tenant_id,
+            user_id=user_id,
+            action="channel.activated",
+            resource_type="channel",
+            resource_id=channel.id
+        )
+        
+        return channel
     
-    async def reset_monthly_usage(
-        self,
-        tenant_id: uuid.UUID
-    ) -> None:
-        """Reset monthly usage for all channels (called by scheduler)."""
-        try:
-            channels = await self.channel_repo.list_by_tenant(tenant_id)
-            
-            for channel in channels:
-                channel.reset_monthly_usage()
-                await self.channel_repo.update(channel)
-            
-            logger.info(f"Reset monthly usage for {len(channels)} channels")
-            
-        except Exception as e:
-            logger.error(f"Failed to reset usage: {e}")
-            raise
+    async def suspend_channel(
+        self, channel_id: UUID, user_id: Optional[UUID] = None
+    ) -> Channel:
+        """Suspend a channel temporarily."""
+        channel = await self.get_channel(channel_id)
+        channel.suspend()
+        
+        channel = await self.channel_repo.update(channel)
+        
+        await self.audit_logger.log(
+            tenant_id=channel.tenant_id,
+            user_id=user_id,
+            action="channel.suspended",
+            resource_type="channel",
+            resource_id=channel.id
+        )
+        
+        return channel
+    
+    async def get_decrypted_token(self, channel_id: UUID) -> str:
+        """
+        Get decrypted access token for API calls.
+        
+        Use carefully - only for internal services.
+        """
+        channel = await self.get_channel(channel_id)
+        
+        if not channel.is_active():
+            raise ChannelInactiveError(f"Channel {channel_id} is not active")
+        
+        return decrypt_field_value(channel.access_token_encrypted)

@@ -7,11 +7,12 @@ import base64
 import os
 
 from messaging.domain.protocols.external_services import SpeechToTextClient
+from messaging.domain.protocols.speech_transcription import SpeechTranscription
 
 logger = logging.getLogger(__name__)
 
 
-class GoogleSpeechAdapter(SpeechToTextClient):
+class GoogleSpeechAdapter(SpeechTranscription):
     """Google Cloud Speech-to-Text implementation."""
     
     def __init__(self, api_key: Optional[str] = None):
@@ -89,7 +90,6 @@ class GoogleSpeechAdapter(SpeechToTextClient):
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Clean up HTTP client."""
         await self.client.aclose()
-
 
 class MockSpeechAdapter(SpeechToTextClient):
     """Mock implementation for testing."""

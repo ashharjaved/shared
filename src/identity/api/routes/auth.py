@@ -67,7 +67,7 @@ async def login(
     
     if result.is_failure():
         logger.warning(
-            f"Login failed: {result.error}",
+            f"Login failed: {result}",
             extra={"email": body.email, "ip": ip_address},
         )
         raise HTTPException(

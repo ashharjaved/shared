@@ -1,249 +1,230 @@
-"""Template management service."""
+"""
+Template Service
+Business logic for message template management.
+"""
+from typing import List, Optional
+from uuid import UUID, uuid4
 
-from datetime import datetime
-import logging
-from typing import List, Optional, Dict, Any
-import uuid
+from src.messaging.domain.entities.message_template import MessageTemplate
+from src.messaging.domain.protocols.template_repository import TemplateRepository
+from src.messaging.domain.protocols.whatsapp_gateway_repository import WhatsAppGateway
+from src.messaging.domain.exceptions import TemplateNotFoundError, TemplateNotApprovedError
+from shared.infrastructure.observability.logger import get_logger
+from shared.infrastructure.security.audit_log import AuditLogger
 
-from src.messaging.domain.entities.template import (
-    MessageTemplate, TemplateStatus, TemplateCategory, TemplateComponent
-)
-from src.messaging.domain.interfaces.repositories import TemplateRepository, ChannelRepository
-from messaging.domain.protocols.external_services import WhatsAppClient
-from src.messaging.domain.events.message_events import TemplateApproved
-from src.shared_.infrastructure.events import EventBus
-
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class TemplateService:
-    """Service for managing WhatsApp message templates."""
+    """
+    Application service for template operations.
+    
+    Handles template lifecycle: creation, submission, approval tracking.
+    """
     
     def __init__(
         self,
         template_repo: TemplateRepository,
-        channel_repo: ChannelRepository,
-        whatsapp_client: WhatsAppClient,
-        event_bus: EventBus
+        whatsapp_gateway: WhatsAppGateway,
+        audit_logger: AuditLogger
     ):
         self.template_repo = template_repo
-        self.channel_repo = channel_repo
-        self.whatsapp_client = whatsapp_client
-        self.event_bus = event_bus
+        self.whatsapp_gateway = whatsapp_gateway
+        self.audit_logger = audit_logger
     
     async def create_template(
         self,
-        tenant_id: uuid.UUID,
-        channel_id: uuid.UUID,
+        tenant_id: UUID,
         name: str,
         language: str,
         category: str,
-        components: List[Dict[str, Any]]
+        body_text: str,
+        header_text: Optional[str] = None,
+        footer_text: Optional[str] = None,
+        buttons: Optional[List[dict]] = None,
+        variables: Optional[List[str]] = None,
+        user_id: Optional[UUID] = None
     ) -> MessageTemplate:
-        """Create a new message template."""
-        try:
-            # Validate channel exists
-            channel = await self.channel_repo.get_by_id(channel_id, tenant_id)
-            if not channel:
-                raise ValueError(f"Channel {channel_id} not found")
-            
-            # Parse components
-            template_components = []
-            for comp in components:
-                template_components.append(TemplateComponent(
-                    type=comp["type"],
-                    format=comp.get("format"),
-                    text=comp.get("text"),
-                    example=comp.get("example"),
-                    buttons=comp.get("buttons")
-                ))
-            
-            # Create template entity
-            template = MessageTemplate(
-                id=uuid.uuid4(),
-                tenant_id=tenant_id,
-                channel_id=channel_id,
-                name=name,
-                language=language,
-                category=TemplateCategory(category),
-                status=TemplateStatus.DRAFT,
-                components=template_components
-            )
-            
-            # Save template
-            template = await self.template_repo.create(template)
-            
-            logger.info(f"Template {template.id} created: {name}")
-            
-            return template
-            
-        except Exception as e:
-            logger.error(f"Failed to create template: {e}")
-            raise
+        """Create new message template in draft status."""
+        # Check for duplicate
+        existing = await self.template_repo.get_by_name_and_language(
+            tenant_id, name, language
+        )
+        if existing:
+            raise ValueError("Template with this name and language already exists")
+        
+        # Create entity
+        template = MessageTemplate(
+            id=uuid4(),
+            tenant_id=tenant_id,
+            name=name,
+            language=language,
+            category=category,
+            body_text=body_text,
+            header_text=header_text,
+            footer_text=footer_text,
+            buttons=buttons or [],
+            variables=variables or []
+        )
+        
+        # Persist
+        template = await self.template_repo.create(template)
+        
+        # Audit log
+        self.audit_logger.log_data_access(
+            organization_id=tenant_id,
+            user_id=UUID(user_id) if user_id else None,
+            action="template.created",
+            resource_type="template",
+            resource_id=template.id,
+#            details={"name": name, "language": language}
+        )
+        
+        logger.info(f"Template created: {template.id}")
+        
+        return template
     
     async def submit_for_approval(
         self,
-        template_id: uuid.UUID,
-        tenant_id: uuid.UUID,
-        business_id: str
+        template_id: UUID,
+        waba_id: str,
+        user_id: Optional[UUID] = None
     ) -> MessageTemplate:
         """Submit template to WhatsApp for approval."""
-        try:
-            # Get template
-            template = await self.template_repo.get_by_id(template_id, tenant_id)
-            if not template:
-                raise ValueError(f"Template {template_id} not found")
-            
-            # Get channel for access token
-            channel = await self.channel_repo.get_by_id(template.channel_id, tenant_id)
-            if not channel:
-                raise ValueError(f"Channel {template.channel_id} not found")
-            
-            # Build WhatsApp template data
-            wa_template_data = self._build_whatsapp_template(template)
-            
-            # Submit to WhatsApp
-            response = await self.whatsapp_client.submit_template(
-                business_id,
-                channel.access_token,
-                wa_template_data
-            )
-            
-            if "id" in response:
-                # Mark as pending
-                template.submit_for_approval()
-                template.whatsapp_template_id = response["id"]
-                await self.template_repo.update(template)
-                
-                logger.info(f"Template {template_id} submitted for approval")
-            else:
-                error = response.get("error", {}).get("message", "Unknown error")
-                raise ValueError(f"Template submission failed: {error}")
-            
-            return template
-            
-        except Exception as e:
-            logger.error(f"Failed to submit template: {e}")
-            raise
+        template = await self.template_repo.get_by_id(template_id)
+        
+        if not template:
+            raise TemplateNotFoundError(f"Template {template_id} not found")
+        
+        # Submit to WhatsApp
+        wa_template = {
+            "name": template.name,
+            "language": template.language,
+            "category": template.category,
+            "components": self._build_components(template)
+        }
+        
+        response = await self.whatsapp_gateway.create_template(waba_id, wa_template)
+        
+        # Update status
+        template.submit_for_approval()
+        template = await self.template_repo.update(template)
+        
+        # Audit log
+        self.audit_logger.log_data_access(
+            organization_id=template.tenant_id,
+            user_id=user_id,
+            action="template.submitted",
+            resource_type="template",
+            resource_id=template.id,
+        )
+        
+        logger.info(f"Template submitted: {template.id}")
+        
+        return template
     
-    async def check_approval_status(
+    async def mark_approved(
         self,
-        template_id: uuid.UUID,
-        tenant_id: uuid.UUID
+        template_id: UUID,
+        wa_template_id: str,
+        user_id: Optional[UUID] = None
     ) -> MessageTemplate:
-        """Check and update template approval status."""
-        try:
-            template = await self.template_repo.get_by_id(template_id, tenant_id)
-            if not template:
-                raise ValueError(f"Template {template_id} not found")
-            
-            if not template.whatsapp_template_id:
-                return template
-            
-            # Get channel for access token
-            channel = await self.channel_repo.get_by_id(template.channel_id, tenant_id)
-            if not channel:
-                raise ValueError(f"Channel {template.channel_id} not found")
-            
-            # Check status via WhatsApp API
-            # (Implementation depends on WhatsApp API specifics)
-            # For now, we'll simulate approval
-            
-            # Update status
-            if template.status == TemplateStatus.PENDING:
-                # Simulate approval after some time
-                from datetime import timedelta
-                if template.submitted_at:
-                    time_elapsed = datetime.utcnow() - template.submitted_at
-                    if time_elapsed > timedelta(hours=2):
-                        template.approve(template.whatsapp_template_id)
-                        await self.template_repo.update(template)
-                        
-                        # Publish event
-                        event = TemplateApproved(
-                            event_id=uuid.uuid4(),
-                            aggregate_id=template.id,
-                            tenant_id=tenant_id,
-                            occurred_at=datetime.utcnow(),
-                            template_name=template.name,
-                            whatsapp_template_id=template.whatsapp_template_id
-                        )
-                        await self.event_bus.publish(event)
-                        
-                        logger.info(f"Template {template_id} approved")
-            
-            return template
-            
-        except Exception as e:
-            logger.error(f"Failed to check approval: {e}")
-            raise
+        """Mark template as approved by WhatsApp."""
+        template = await self.template_repo.get_by_id(template_id)
+        
+        if not template:
+            raise TemplateNotFoundError(f"Template {template_id} not found")
+        
+        template.approve(wa_template_id)
+        template = await self.template_repo.update(template)
+        
+        await self.audit_logger.log(
+            tenant_id=template.tenant_id,
+            user_id=user_id,
+            action="template.approved",
+            resource_type="template",
+            resource_id=template.id
+        )
+        
+        logger.info(f"Template approved: {template.id}")
+        
+        return template
+    
+    async def mark_rejected(
+        self,
+        template_id: UUID,
+        reason: str,
+        user_id: Optional[UUID] = None
+    ) -> MessageTemplate:
+        """Mark template as rejected by WhatsApp."""
+        template = await self.template_repo.get_by_id(template_id)
+        
+        if not template:
+            raise TemplateNotFoundError(f"Template {template_id} not found")
+        
+        template.reject(reason)
+        template = await self.template_repo.update(template)
+        
+        await self.audit_logger.log(
+            tenant_id=template.tenant_id,
+            user_id=user_id,
+            action="template.rejected",
+            resource_type="template",
+            resource_id=template.id,
+            details={"reason": reason}
+        )
+        
+        logger.warning(f"Template rejected: {template.id}, reason: {reason}")
+        
+        return template
     
     async def list_templates(
         self,
-        channel_id: uuid.UUID,
-        tenant_id: uuid.UUID,
-        status_filter: Optional[str] = None
+        tenant_id: UUID,
+        status: Optional[str] = None
     ) -> List[MessageTemplate]:
-        """List templates for a channel."""
-        return await self.template_repo.list_by_channel(
-            channel_id,
-            tenant_id,
-            status_filter
-        )
+        """List templates for tenant."""
+        return await self.template_repo.list_by_tenant(tenant_id, status)
     
-    async def get_template(
-        self,
-        template_id: uuid.UUID,
-        tenant_id: uuid.UUID
-    ) -> Optional[MessageTemplate]:
+    async def get_template(self, template_id: UUID) -> MessageTemplate:
         """Get template by ID."""
-        return await self.template_repo.get_by_id(template_id, tenant_id)
+        template = await self.template_repo.get_by_id(template_id)
+        
+        if not template:
+            raise TemplateNotFoundError(f"Template {template_id} not found")
+        
+        return template
     
-    async def delete_template(
-        self,
-        template_id: uuid.UUID,
-        tenant_id: uuid.UUID
-    ) -> None:
-        """Delete a template."""
-        try:
-            template = await self.template_repo.get_by_id(template_id, tenant_id)
-            if not template:
-                raise ValueError(f"Template {template_id} not found")
-            
-            if template.status != TemplateStatus.DRAFT:
-                raise ValueError("Can only delete draft templates")
-            
-            await self.template_repo.delete(template_id, tenant_id)
-            
-            logger.info(f"Template {template_id} deleted")
-            
-        except Exception as e:
-            logger.error(f"Failed to delete template: {e}")
-            raise
-    
-    def _build_whatsapp_template(self, template: MessageTemplate) -> Dict[str, Any]:
-        """Build WhatsApp API template format."""
+    def _build_components(self, template: MessageTemplate) -> List[dict]:
+        """Build WhatsApp template components from domain template."""
         components = []
         
-        for comp in template.components:
-            wa_comp = {
-                "type": comp.type
-            }
-            
-            if comp.text:
-                wa_comp["text"] = comp.text
-            if comp.format:
-                wa_comp["format"] = comp.format
-            if comp.example:
-                wa_comp["example"] = {"body_text": [comp.example]}
-            if comp.buttons:
-                wa_comp["buttons"] = comp.buttons
-            
-            components.append(wa_comp)
+        # Header
+        if template.header_text:
+            components.append({
+                "type": "HEADER",
+                "format": "TEXT",
+                "text": template.header_text
+            })
         
-        return {
-            "name": template.name,
-            "language": template.language,
-            "category": template.category.value.upper(),
-            "components": components
-        }
+        # Body
+        components.append({
+            "type": "BODY",
+            "text": template.body_text
+        })
+        
+        # Footer
+        if template.footer_text:
+            components.append({
+                "type": "FOOTER",
+                "text": template.footer_text
+            })
+        
+        # Buttons
+        if template.buttons:
+            components.append({
+                "type": "BUTTONS",
+                "buttons": template.buttons
+            })
+        
+        return components

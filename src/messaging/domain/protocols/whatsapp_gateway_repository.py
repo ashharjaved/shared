@@ -1,21 +1,24 @@
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+"""
+WhatsApp Gateway Protocol
+Abstracts external WhatsApp API integration.
+"""
+from abc import abstractmethod
+from typing import Protocol, Dict, Any, List
 
 
-class WhatsAppGateway(ABC):
-    """Gateway interface for WhatsApp Business API."""
+class WhatsAppGateway(Protocol):
+    """
+    Protocol for WhatsApp Business API integration.
+    
+    Isolates domain from Meta Graph API specifics.
+    """
     
     @abstractmethod
-    async def send_message(
-        self,
-        phone_number_id: str,
-        to: str,
-        message_type: str,
-        content: Dict[str, Any],
-        access_token: str
+    async def send_text_message(
+        self, phone_number_id: str, to: str, body: str
     ) -> Dict[str, Any]:
-        """Send a message via WhatsApp API."""
-        pass
+        """Send text message via WhatsApp Cloud API."""
+        ...
     
     @abstractmethod
     async def send_template_message(
@@ -24,37 +27,35 @@ class WhatsAppGateway(ABC):
         to: str,
         template_name: str,
         language_code: str,
-        components: List[Dict],
-        access_token: str
+        components: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Send a template message."""
-        pass
+        """Send template message with variable substitution."""
+        ...
     
     @abstractmethod
-    async def get_media_url(
-        self,
-        media_id: str,
-        access_token: str
-    ) -> str:
-        """Get media download URL."""
-        pass
+    async def send_interactive_message(
+        self, phone_number_id: str, to: str, interactive: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Send interactive message (buttons, lists)."""
+        ...
     
     @abstractmethod
-    async def download_media(
-        self,
-        media_url: str,
-        access_token: str
-    ) -> bytes:
-        """Download media file."""
-        pass
+    async def get_message_templates(
+        self, waba_id: str
+    ) -> List[Dict[str, Any]]:
+        """Fetch message templates from WhatsApp."""
+        ...
     
     @abstractmethod
-    async def upload_media(
-        self,
-        phone_number_id: str,
-        file_data: bytes,
-        mime_type: str,
-        access_token: str
-    ) -> str:
-        """Upload media and get media ID."""
-        pass
+    async def create_template(
+        self, waba_id: str, template: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Submit new template for approval."""
+        ...
+    
+    @abstractmethod
+    async def mark_message_read(
+        self, phone_number_id: str, message_id: str
+    ) -> bool:
+        """Mark message as read."""
+        ...

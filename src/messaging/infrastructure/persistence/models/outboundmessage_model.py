@@ -1,44 +1,51 @@
-"""Outbound Message ORM Model"""
+"""
+SQLAlchemy ORM Model for OutboundMessage
+"""
 from __future__ import annotations
 
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, Integer, JSON, String
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from messaging.infrastructure.persistence.models.channel_model import ChannelModel
+from messaging.infrastructure.persistence.models.message_template_model import MessageTemplateModel
 from shared.infrastructure.database.base_model import Base
 
 
 class OutboundMessageModel(Base):
-    """
-    Outbound WhatsApp message ORM model.
-    
-    Stores all outgoing messages sent via WhatsApp Business API.
-    Tracks delivery status and supports idempotency.
-    """
+    """ORM model for whatsapp.outbound_messages table (partitioned by month)."""
     
     __tablename__ = "outbound_messages"
     __table_args__ = (
-        UniqueConstraint("wa_message_id", name="uq_outbound_messages_wa_message_id"),
-        UniqueConstraint("idempotency_key", name="uq_outbound_messages_idempotency_key"),
-        Index("idx_outbound_account_time", "account_id", "created_at"),
-        Index("idx_outbound_to_phone", "to_phone"),
-        Index("idx_outbound_status", "status"),
-        Index("idx_outbound_idempotency", "idempotency_key"),
+        Index("idx_outbound_channel_status", "channel_id", "status"),
+        Index("idx_outbound_tenant", "tenant_id"),
+        Index("idx_outbound_wa_message_id", "wa_message_id"),
         {"schema": "whatsapp"}
     )
     
-    # Primary key inherited from Base (id, created_at, updated_at)
-    
-    account_id: Mapped[UUID] = mapped_column(
+    # Override base id
+    id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
-        ForeignKey("whatsapp.accounts.id", ondelete="CASCADE"),
+        primary_key=True,
         nullable=False,
     )
     
-    to_phone: Mapped[str] = mapped_column(
+    tenant_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("identity.tenants.id"),
+        nullable=False,
+    )
+    
+    channel_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("whatsapp.channels.id"),
+        nullable=False,
+    )
+    
+    to_number: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
     )
@@ -53,24 +60,9 @@ class OutboundMessageModel(Base):
         nullable=False,
     )
     
-    template_name: Mapped[str | None] = mapped_column(
-        String(100),
-        nullable=True,
-    )
-    
-    template_language: Mapped[str | None] = mapped_column(
-        String(10),
-        nullable=True,
-    )
-    
-    template_params: Mapped[dict | None] = mapped_column(
-        JSON,
-        nullable=True,
-    )
-    
-    wa_message_id: Mapped[str | None] = mapped_column(
-        String(100),
-        unique=True,
+    template_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("whatsapp.message_templates.id"),
         nullable=True,
     )
     
@@ -80,23 +72,8 @@ class OutboundMessageModel(Base):
         nullable=False,
     )
     
-    sent_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-    
-    delivered_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-    
-    read_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-    
-    failed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
+    wa_message_id: Mapped[str | None] = mapped_column(
+        String(100),
         nullable=True,
     )
     
@@ -106,7 +83,7 @@ class OutboundMessageModel(Base):
     )
     
     error_message: Mapped[str | None] = mapped_column(
-        String,
+        String(500),
         nullable=True,
     )
     
@@ -116,17 +93,34 @@ class OutboundMessageModel(Base):
         nullable=False,
     )
     
-    idempotency_key: Mapped[str] = mapped_column(
-        String(100),
-        unique=True,
+    scheduled_at: Mapped[datetime | None] = mapped_column(
+        nullable=True,
+    )
+    
+    sent_at: Mapped[datetime | None] = mapped_column(
+        nullable=True,
+    )
+    
+    delivered_at: Mapped[datetime | None] = mapped_column(
+        nullable=True,
+    )
+    
+    read_at: Mapped[datetime | None] = mapped_column(
+        nullable=True,
+    )
+    
+    # Override created_at and updated_at
+    created_at: Mapped[datetime] = mapped_column(
         nullable=False,
     )
     
-    metadata: Mapped[dict] = mapped_column(
-        JSON,
-        default=dict,
+    updated_at: Mapped[datetime] = mapped_column(
         nullable=False,
     )
     
-    def __repr__(self) -> str:
-        return f"<OutboundMessageModel(id={self.id}, status={self.status})>"
+    # Relationships
+    channel: Mapped[ChannelModel] = relationship(
+        back_populates="outbound_messages",
+    )
+    
+    template: Mapped[MessageTemplateModel | None] = relationship()

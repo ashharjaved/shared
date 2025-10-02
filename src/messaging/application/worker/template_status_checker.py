@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import List
 
 from src.messaging.application.services.template_service import TemplateService
-from src.messaging.domain.entities.template import TemplateStatus
+from messaging.domain.entities.message_template import TemplateStatus
 from src.shared_.database import get_async_session
 from sqlalchemy import text
 
